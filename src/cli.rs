@@ -85,7 +85,7 @@ pub struct ConvertArgs {
     pub lod: usize,
 
     /// Step down to coarser model LODs until each model has at most this many triangles.
-    #[arg(long, default_value_t = 100_000)]
+    #[arg(long, default_value_t = 500_000)]
     pub max_tris: usize,
 }
 

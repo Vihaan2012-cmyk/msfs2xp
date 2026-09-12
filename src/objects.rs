@@ -50,7 +50,7 @@ impl Default for ObjectOptions {
     fn default() -> Self {
         ObjectOptions {
             lod: 0,
-            max_triangles: 100_000,
+            max_triangles: 500_000,
         }
     }
 }
