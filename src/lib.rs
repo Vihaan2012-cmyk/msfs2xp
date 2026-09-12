@@ -2,6 +2,7 @@
 
 pub mod bgl;
 pub mod cli;
+pub mod geo;
 
 use anyhow::Context;
 
