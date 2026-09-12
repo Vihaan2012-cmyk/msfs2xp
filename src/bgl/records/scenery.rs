@@ -20,6 +20,11 @@ use crate::bgl::file::{BglFile, SECTION_SCENERY_OBJECT};
 use crate::bgl::guid::Guid;
 
 pub const SO_LIBRARY_OBJECT: u16 = 0x000B;
+/// MSFS 2024 SimProp container placement: the library-object head (with the
+/// same 64- and 92-byte variants), then an instance GUID, the scale and the
+/// container GUID, which are the last 36, 20 and 16 bytes of the record.
+pub const SO_SIMPROP_CONTAINER: u16 = 0x001B;
+const CONTAINER_MIN: usize = 0x40;
 const LIB_OBJECT_MIN: usize = 64;
 const LIB_OBJECT_HIRES: usize = 92;
 
@@ -147,10 +152,64 @@ pub fn parse_sim_object(rec: &[u8]) -> Option<RawPlacement> {
     })
 }
 
+/// One placed SimProp container (MSFS 2024).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawContainerPlacement {
+    pub lat: f64,
+    pub lon: f64,
+    pub alt_m: f64,
+    pub agl: bool,
+    /// Degrees true.
+    pub heading: f32,
+    pub scale: f32,
+    pub container: Guid,
+}
+
+/// Parse a SimProp container placement record, header included.
+pub fn parse_container_placement(rec: &[u8]) -> Option<RawContainerPlacement> {
+    if rec.len() < CONTAINER_MIN || u16_at(rec, 0) != SO_SIMPROP_CONTAINER {
+        return None;
+    }
+    let size = (u16_at(rec, 2) as usize).min(rec.len());
+    if size < CONTAINER_MIN {
+        return None;
+    }
+    let container = Guid::from_slice(&rec[size - 16..size]).filter(|g| !g.is_nil())?;
+    let scale = f32::from_le_bytes([rec[size - 20], rec[size - 19], rec[size - 18], rec[size - 17]]);
+    let mut lon = lon_from_u32(u32_at(rec, 0x04));
+    let mut lat = lat_from_u32(u32_at(rec, 0x08));
+    let coarse_heading = u16_at(rec, 0x16);
+    let mut heading = angle_u16(coarse_heading);
+    if size >= LIB_OBJECT_HIRES {
+        // Same precise copies as the 92-byte library object, trusted only
+        // when they agree with the coarse values.
+        let (plat, plon) = (f64_at(rec, 0x2C), f64_at(rec, 0x34));
+        if plat.is_finite() && plon.is_finite() && (plat - lat).abs() < 1e-3 && (plon - lon).abs() < 1e-3 {
+            lat = plat;
+            lon = plon;
+        }
+        let fine = u32_at(rec, 0x44);
+        if (fine >> 16) as u16 == coarse_heading {
+            heading = (fine as f64 * 360.0 / 4_294_967_296.0) as f32;
+        }
+    }
+    Some(RawContainerPlacement {
+        lon,
+        lat,
+        alt_m: alt_from_i32(u32_at(rec, 0x0C) as i32),
+        agl: u16_at(rec, 0x10) & 0x0001 != 0,
+        heading: if heading >= 360.0 { heading - 360.0 } else { heading },
+        scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 },
+        container,
+    })
+}
+
 /// Everything found in a file's scenery-object sections.
 #[derive(Debug, Default)]
 pub struct PlacementScan {
     pub placements: Vec<RawPlacement>,
+    /// SimProp container placements, expanded later from the container files.
+    pub containers: Vec<RawContainerPlacement>,
     /// Record types we saw but do not convert, with counts.
     pub other_kinds: BTreeMap<u16, usize>,
     /// `(lat, lon)` of windsock objects (record 0x0018), which X-Plane draws
@@ -180,6 +239,15 @@ pub fn parse_placements(file: &BglFile) -> PlacementScan {
                 if id == SO_WINDSOCK && size >= 12 {
                     scan.windsocks
                         .push((lat_from_u32(u32_at(rec, 0x08)), lon_from_u32(u32_at(rec, 0x04))));
+                    pos += size;
+                    seen += 1;
+                    continue;
+                }
+                if id == SO_SIMPROP_CONTAINER {
+                    match parse_container_placement(rec) {
+                        Some(c) => scan.containers.push(c),
+                        None => *scan.other_kinds.entry(id).or_default() += 1,
+                    }
                     pos += size;
                     seen += 1;
                     continue;
@@ -301,7 +369,7 @@ mod tests {
     #[test]
     fn scans_a_section_and_counts_other_kinds() {
         let mut other = classic(1.0, 2.0, 0, 1.0);
-        other[0] = 0x1B; // an unrelated record type of the same size
+        other[0] = 0x1C; // an unrelated record type of the same size
         let data = BglBuilder::new()
             .section(
                 SECTION_SCENERY_OBJECT,
@@ -316,7 +384,37 @@ mod tests {
         let scan = parse_placements(&file);
         assert_eq!(scan.placements.len(), 2);
         assert_eq!(scan.placements[1].scale, 2.0);
-        assert_eq!(scan.other_kinds.get(&0x1B), Some(&1));
+        assert_eq!(scan.other_kinds.get(&0x1C), Some(&1));
+    }
+
+    #[test]
+    fn reads_simprop_container_placements() {
+        let mut rec = classic(41.975517, -87.903277, 0x8000, 1.0);
+        rec[0] = 0x1B;
+        rec[0x2C..0x30].copy_from_slice(&2.0f32.to_le_bytes());
+        rec[0x30..0x40].copy_from_slice(&GUID);
+        let c = parse_container_placement(&rec).unwrap();
+        assert!((c.lat - 41.975517).abs() < 1e-5 && (c.lon + 87.903277).abs() < 1e-5);
+        assert!((c.heading - 180.0).abs() < 0.01);
+        assert_eq!(c.scale, 2.0);
+        assert_eq!(c.container, Guid(GUID));
+        let data = BglBuilder::new().section(SECTION_SCENERY_OBJECT, vec![rec]).build();
+        let scan = parse_placements(&BglFile::parse(&data).unwrap());
+        assert_eq!(scan.containers.len(), 1);
+        assert!(scan.placements.is_empty());
+    }
+
+    #[test]
+    fn reads_92_byte_container_placements_from_the_end() {
+        let mut rec = hires(25.25, 55.36, 0x4000_1234, 1.0);
+        rec[0] = 0x1B;
+        rec[72..76].copy_from_slice(&1.0f32.to_le_bytes());
+        rec[76..92].copy_from_slice(&GUID);
+        let c = parse_container_placement(&rec).unwrap();
+        assert_eq!(c.container, Guid(GUID));
+        assert_eq!(c.scale, 1.0);
+        assert!((c.lat - 25.25).abs() < 1e-9, "precise latitude is used");
+        assert!((c.heading - 90.0).abs() < 0.01);
     }
 
     #[test]

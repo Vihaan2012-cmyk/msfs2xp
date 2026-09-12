@@ -2,7 +2,7 @@
 name = "msfs2xp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.86"
 description = "Convert Microsoft Flight Simulator 2020/2024 airports to X-Plane 12 apt.dat scenery"
 license = "MIT"
 

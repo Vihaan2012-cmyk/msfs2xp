@@ -7,6 +7,7 @@ pub mod inspect;
 pub mod modellib;
 pub mod reader;
 pub mod records;
+pub mod spb;
 
 #[cfg(test)]
 pub mod testutil;

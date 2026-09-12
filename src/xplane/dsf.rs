@@ -109,7 +109,7 @@ pub fn build_tile(south: i32, west: i32, objects: &[String], placements: &[Place
     let mut pools: Vec<Vec<Placement>> = Vec::new();
     for (_, mut list) in cells {
         // Sorting by object lets commands place runs of the same object.
-        list.sort_by(|a, b| a.object.cmp(&b.object));
+        list.sort_by_key(|p| p.object);
         for chunk in list.chunks(65_535) {
             pools.push(chunk.to_vec());
         }

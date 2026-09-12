@@ -4,9 +4,13 @@
 //! several materials with a texture each. A model is therefore split into one
 //! object per base texture; all of them are placed at the same point.
 //!
-//! Axes need no remapping. MSFS models come out of Blender's glTF exporter,
-//! which writes +X east, +Y up and +Z south for a model authored facing north,
-//! and that is exactly X-Plane's object space. Texture rows do need care: glTF
+//! Axes are turned 180 degrees about the vertical. In MSFS model files a model
+//! faces +Z with +X on its left (glTF convention), so for a placement heading of
+//! zero +Z points north and +X west. X-Plane object space has +X east and +Z
+//! south, so X and Z are both negated. This is a rotation, not a mirror, so
+//! triangle winding is unchanged. (O'Hare's Terminal 3 confirms it: its model
+//! lies at +X and -Z of a container placed with heading 180, and the terminal
+//! is east and north of that point.) Texture rows also need care: glTF
 //! puts V = 0 at the top of the image and X-Plane puts T = 0 at the bottom, so
 //! T = 1 - V. The texture converter keeps images in X-Plane's orientation so the
 //! same rule holds for every texture format.
@@ -23,6 +27,9 @@ pub struct ObjOptions {
     pub texture: Option<String>,
     /// Uniform scale baked into the vertices (DSF placements cannot scale).
     pub scale: f32,
+    /// Height in metres added to every vertex, for objects MSFS places above
+    /// the ground (DSF placements always sit on the terrain).
+    pub offset_y: f32,
 }
 
 /// Group a model's meshes by base-colour texture, in a stable order.
@@ -59,12 +66,13 @@ pub fn write_obj8(model: &Model, meshes: &[usize], opts: &ObjOptions) -> String 
             let _ = writeln!(
                 vt,
                 "VT {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.5} {:.5}",
-                v.pos[0] * scale,
-                v.pos[1] * scale,
-                v.pos[2] * scale,
-                v.normal[0],
+                // Adding 0.0 turns -0.0 into 0.0 so output stays tidy.
+                -v.pos[0] * scale + 0.0,
+                v.pos[1] * scale + opts.offset_y,
+                -v.pos[2] * scale + 0.0,
+                -v.normal[0] + 0.0,
                 v.normal[1],
-                v.normal[2],
+                -v.normal[2] + 0.0,
                 v.uv[0],
                 1.0 - v.uv[1]
             );
@@ -158,6 +166,30 @@ mod tests {
     }
 
     #[test]
+    fn models_are_turned_to_xplane_axes_and_lifted() {
+        // Two triangles: the second sits at x = 1 in model space.
+        let m = model(
+            2,
+            Material {
+                base_color: Some("a.dds".into()),
+                ..Default::default()
+            },
+        );
+        let s = write_obj8(
+            &m,
+            &[0],
+            &ObjOptions {
+                texture: None,
+                scale: 1.0,
+                offset_y: 5.0,
+            },
+        );
+        // Model +X becomes object -X, and the height offset lifts every vertex.
+        assert!(s.contains("VT -1.0000 6.0000 0.0000 0.0000 0.0000 -1.0000"), "{s}");
+        assert!(!s.contains("VT -0.0000"), "no negative zeros: {s}");
+    }
+
+    #[test]
     fn writes_the_obj8_structure() {
         let m = model(
             1,
@@ -172,6 +204,7 @@ mod tests {
             &ObjOptions {
                 texture: Some("textures/a.dds".into()),
                 scale: 2.0,
+                offset_y: 0.0,
             },
         );
         assert!(s.starts_with("I\n800\nOBJ\n\nTEXTURE textures/a.dds\nPOINT_COUNTS 3 0 0 3\n"));

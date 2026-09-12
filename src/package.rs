@@ -15,10 +15,12 @@ use walkdir::WalkDir;
 
 use crate::bgl::file::{SECTION_AIRPORT, SECTION_AIRPORT_ALT, SECTION_SCENERY_OBJECT};
 use crate::bgl::modellib::SECTION_MODEL_DATA;
-use crate::bgl::records::scenery::{self, RawPlacement};
+use crate::bgl::guid::Guid;
+use crate::bgl::records::scenery::{self, RawContainerPlacement, RawPlacement};
+use crate::bgl::spb::{self, ContainerChild};
 use crate::bgl::records::{parse_airport, Variant};
 use crate::bgl::{classify, BglFile, FileClass};
-use crate::geo::{inverse, LatLon};
+use crate::geo::{inverse, LatLon, Plane};
 use crate::materials::{self, MaterialCatalog};
 use crate::model::{self, Airport, SimKind, Windsock};
 
@@ -233,6 +235,7 @@ pub fn load(source: &Source, hint: Option<Variant>) -> Loaded {
         notes: Vec::new(),
     };
     let mut windsocks: Vec<LatLon> = Vec::new();
+    let mut containers: Vec<RawContainerPlacement> = Vec::new();
 
     for path in &source.files {
         let rel = path.strip_prefix(&source.root).unwrap_or(path).display().to_string();
@@ -283,7 +286,12 @@ pub fn load(source: &Source, hint: Option<Variant>) -> Loaded {
         }
         let scan = scenery::parse_placements(&file);
         loaded.placements.extend(scan.placements);
+        containers.extend(scan.containers);
         windsocks.extend(scan.windsocks.into_iter().map(|(lat, lon)| LatLon::new(lat, lon)));
+    }
+
+    if !containers.is_empty() {
+        expand_containers(&source.root, &containers, &mut loaded);
     }
 
     loaded.airports = model::merge::merge_by_ident(std::mem::take(&mut loaded.airports));
@@ -318,9 +326,124 @@ pub fn load(source: &Source, hint: Option<Variant>) -> Loaded {
     loaded
 }
 
+/// The package's SimProp container index: container GUID to file. MSFS 2024
+/// packages keep it as `simPropContainers.json` (paths relative to the package
+/// root), in whatever folder the author chose.
+fn container_index(root: &Path) -> std::collections::HashMap<Guid, PathBuf> {
+    let mut index = std::collections::HashMap::new();
+    for e in WalkDir::new(root).max_depth(4).into_iter().filter_map(Result::ok) {
+        if !e.file_name().to_string_lossy().eq_ignore_ascii_case("simpropcontainers.json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        for item in json["content"].as_array().into_iter().flatten() {
+            let (Some(g), Some(p)) = (item["guid"].as_str(), item["path"].as_str()) else { continue };
+            let Ok(g) = g.parse::<Guid>() else { continue };
+            let rel = p.replace(char::from(92u8), "/");
+            let mut path = root.join(&rel);
+            if !path.is_file() {
+                if let Some(parent) = e.path().parent() {
+                    path = parent.join(&rel);
+                }
+            }
+            index.insert(g, path);
+        }
+    }
+    index
+}
+
+/// Where a container child ends up in the world.
+fn child_placement(c: &RawContainerPlacement, k: &ContainerChild) -> RawPlacement {
+    let s = c.scale as f64;
+    let (ox, oy, oz) = (k.offset[0] as f64 * s, k.offset[1] as f64 * s, k.offset[2] as f64 * s);
+    // Offsets are +X right and +Z forward of the container; heading turns
+    // clockwise from north.
+    let h = (c.heading as f64).to_radians();
+    let east = ox * h.cos() + oz * h.sin();
+    let north = -ox * h.sin() + oz * h.cos();
+    let p = Plane::new(LatLon::new(c.lat, c.lon)).to_latlon(east, north);
+    RawPlacement {
+        lat: p.lat,
+        lon: p.lon,
+        alt_m: c.alt_m + oy,
+        agl: c.agl,
+        pitch: k.pitch,
+        bank: k.bank,
+        heading: (c.heading + k.heading).rem_euclid(360.0),
+        scale: c.scale * k.scale,
+        guid: k.model,
+    }
+}
+
+/// Replace every container placement with placements of its child models.
+fn expand_containers(root: &Path, containers: &[RawContainerPlacement], loaded: &mut Loaded) {
+    let index = container_index(root);
+    let mut cache: std::collections::HashMap<Guid, Option<Vec<ContainerChild>>> = std::collections::HashMap::new();
+    let (mut children, mut missing, mut unreadable) = (0usize, 0usize, 0usize);
+    for c in containers {
+        let parsed = cache.entry(c.container).or_insert_with(|| {
+            let path = index.get(&c.container)?;
+            let data = std::fs::read(path).ok()?;
+            match spb::parse_container(&data) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    loaded.problems.push(format!("{}: {e}", path.display()));
+                    None
+                }
+            }
+        });
+        match parsed {
+            Some(list) => {
+                for k in list.iter() {
+                    loaded.placements.push(child_placement(c, k));
+                    children += 1;
+                }
+            }
+            None if index.contains_key(&c.container) => unreadable += 1,
+            None => missing += 1,
+        }
+    }
+    loaded.notes.push(format!(
+        "{} SimProp container placements expanded into {children} objects ({} container files indexed; {missing} placements name a container not in the package, {unreadable} unreadable)",
+        containers.len(),
+        index.len()
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_children_are_rotated_by_the_container_heading() {
+        let c = RawContainerPlacement {
+            lat: 41.975517,
+            lon: -87.903277,
+            alt_m: 1.0,
+            agl: true,
+            heading: 180.0,
+            scale: 1.0,
+            container: Guid::NIL,
+        };
+        let k = ContainerChild {
+            model: Guid([1; 16]),
+            offset: [-400.0, 5.0, 100.0], // 400 m left and 100 m ahead
+            pitch: 0.0,
+            bank: 0.0,
+            heading: 90.0,
+            scale: 1.0,
+        };
+        let p = child_placement(&c, &k);
+        let plane = Plane::new(LatLon::new(c.lat, c.lon));
+        let (east, north) = plane.to_xy(LatLon::new(p.lat, p.lon));
+        // Facing south, left is east and ahead is south.
+        assert!((east - 400.0).abs() < 0.5, "east {east}");
+        assert!((north + 100.0).abs() < 0.5, "north {north}");
+        assert_eq!(p.heading, 270.0);
+        assert_eq!(p.alt_m, 6.0);
+        assert!(p.agl);
+    }
 
     #[test]
     fn a_folder_of_packages_expands_to_each_package() {

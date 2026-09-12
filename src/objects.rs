@@ -15,6 +15,7 @@ use walkdir::WalkDir;
 
 use crate::bgl::guid::Guid;
 use crate::bgl::modellib::{ModelCatalog, ModelLibrary};
+use crate::bgl::records::scenery::RawPlacement;
 use crate::model3d::{load_glb, split_by_texture, write_obj8, ObjOptions};
 use crate::package::Loaded;
 use crate::texture;
@@ -101,6 +102,26 @@ fn texture_stem(name: &str) -> String {
     safe(&stem)
 }
 
+/// One converted object variant: model, scale in thousandths, height above
+/// ground in quarter metres.
+type VariantKey = (Guid, i32, i32);
+
+/// The object files written for one variant and its triangle count, or why it failed.
+type ModelOutcome = Result<(Vec<String>, usize), String>;
+
+/// Delete `.dsf` tiles left by an earlier run (apt.dat is kept).
+fn remove_dsf_tiles(nav: &Path) -> std::io::Result<()> {
+    if !nav.is_dir() {
+        return Ok(());
+    }
+    for e in WalkDir::new(nav).min_depth(2).max_depth(2).into_iter().filter_map(Result::ok) {
+        if e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("dsf")) {
+            std::fs::remove_file(e.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Convert the placed models of a loaded package into `pack_dir`.
 pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::Result<ObjectsReport> {
     let mut report = ObjectsReport {
@@ -118,13 +139,22 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         }
     }
 
-    // Distinct (model, scale) pairs, scale rounded so float noise does not
-    // multiply the object count.
-    let key = |g: &Guid, s: f32| (*g, (s * 1000.0).round() as i32);
-    let mut wanted: BTreeMap<(Guid, i32), f32> = BTreeMap::new();
+    // Distinct (model, scale, height) triples. Scale is rounded so float noise
+    // does not multiply the object count. DSF objects always sit on the
+    // terrain, so MSFS heights above ground are baked into the object, in
+    // quarter-metre steps; anything lower than that stays on the ground.
+    let key = |p: &RawPlacement| -> VariantKey {
+        let quarters = if p.agl && p.alt_m.is_finite() && p.alt_m.abs() >= 0.25 {
+            (p.alt_m * 4.0).round() as i32
+        } else {
+            0
+        };
+        (p.guid, (p.scale * 1000.0).round() as i32, quarters)
+    };
+    let mut wanted: BTreeMap<VariantKey, f32> = BTreeMap::new();
     for p in &loaded.placements {
         if catalog.find(&p.guid).is_some() {
-            wanted.entry(key(&p.guid, p.scale)).or_insert(p.scale);
+            wanted.entry(key(p)).or_insert(p.scale);
         } else {
             report.not_in_package += 1;
         }
@@ -132,6 +162,12 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
 
     let objects_dir = pack_dir.join("objects");
     let textures_dir = objects_dir.join("textures");
+    // Start clean: object names depend on scale and height, so files from an
+    // earlier run would otherwise linger and bloat the pack.
+    if objects_dir.is_dir() {
+        std::fs::remove_dir_all(&objects_dir)?;
+    }
+    remove_dsf_tiles(&pack_dir.join("Earth nav data"))?;
     std::fs::create_dir_all(&textures_dir)?;
     let textures = texture_index(&loaded.source.root);
     let written_textures: Mutex<HashMap<String, Option<String>>> = Mutex::new(HashMap::new());
@@ -162,10 +198,10 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     };
 
     // Convert models in parallel. Each yields the object files it produced.
-    let results: Vec<((Guid, i32), Result<(Vec<String>, usize), String>)> = wanted
+    let results: Vec<(VariantKey, ModelOutcome)> = wanted
         .par_iter()
         .map(|(&k, &scale)| {
-            let (guid, _) = k;
+            let (guid, _, quarters) = k;
             let lib = catalog.find(&guid).expect("filtered above");
             let outcome = (|| -> Result<(Vec<String>, usize), String> {
                 let info = lib.info(&guid).map_err(|e| e.to_string())?;
@@ -183,11 +219,15 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                     lod += 1;
                 };
                 let base = if info.name.is_empty() { guid.to_string() } else { info.name.clone() };
-                let suffix = if (scale - 1.0).abs() > 1e-3 { format!("_s{}", k.1) } else { String::new() };
+                let mut suffix = if (scale - 1.0).abs() > 1e-3 { format!("_s{}", k.1) } else { String::new() };
+                if quarters != 0 {
+                    suffix.push_str(&format!("_h{quarters}"));
+                }
+                let offset_y = quarters as f32 / 4.0;
                 let mut files = Vec::new();
                 for (i, (tex, meshes)) in split_by_texture(&model).into_iter().enumerate() {
                     let texture = tex.as_deref().and_then(&texture_for);
-                    let text = write_obj8(&model, &meshes, &ObjOptions { texture, scale });
+                    let text = write_obj8(&model, &meshes, &ObjOptions { texture, scale, offset_y });
                     let file = format!("{}{}_{}.obj", safe(&base), suffix, i);
                     std::fs::write(objects_dir.join(&file), text).map_err(|e| e.to_string())?;
                     files.push(format!("objects/{file}"));
@@ -199,7 +239,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         .collect();
 
     let mut object_paths: Vec<String> = Vec::new();
-    let mut objects_of: HashMap<(Guid, i32), Vec<usize>> = HashMap::new();
+    let mut objects_of: HashMap<VariantKey, Vec<usize>> = HashMap::new();
     for (k, r) in results {
         match r {
             Ok((files, tris)) => {
@@ -221,7 +261,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
 
     let mut placements = Vec::new();
     for p in &loaded.placements {
-        if let Some(objs) = objects_of.get(&key(&p.guid, p.scale)) {
+        if let Some(objs) = objects_of.get(&key(p)) {
             report.placed += 1;
             for &o in objs {
                 placements.push(Placement {
