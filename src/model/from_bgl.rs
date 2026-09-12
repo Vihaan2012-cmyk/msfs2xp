@@ -512,8 +512,12 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
         .collect();
 
     // A tower position equal to the airport reference means it was never set.
+    // MSFS 2024 leaves the field zeroed, which decodes to 90N 180W, so the
+    // tower must also be near the airport.
     let tower_pos = LatLon::new(raw.tower_lat, raw.tower_lon);
-    let tower = if tower_pos.is_valid() && (raw.tower_alt_m - raw.alt_m).abs() > 0.5 {
+    let datum = LatLon::new(raw.lat, raw.lon);
+    let near = tower_pos.is_valid() && datum.is_valid() && crate::geo::inverse(datum, tower_pos).0 < 10_000.0;
+    let tower = if near && (raw.tower_alt_m - raw.alt_m).abs() > 0.5 {
         Some(Tower {
             pos: tower_pos,
             elevation_m: raw.tower_alt_m,
@@ -723,6 +727,21 @@ mod tests {
             alt_m: 19.0,
             tower_lat: 25.25,
             tower_lon: 55.36,
+            tower_alt_m: 19.0,
+            ..Default::default()
+        };
+        assert!(airport_from_raw(raw, "f.bgl", "pkg").tower.is_none());
+    }
+
+    #[test]
+    fn tower_is_dropped_when_its_position_is_blank() {
+        let raw = RawAirport {
+            variant: Variant::Msfs2020,
+            lat: 25.25,
+            lon: 55.36,
+            alt_m: 19.0,
+            tower_lat: 90.0,
+            tower_lon: -180.0,
             tower_alt_m: 19.0,
             ..Default::default()
         };
