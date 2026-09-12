@@ -1,0 +1,119 @@
+//! Command line interface definition.
+
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+
+/// Convert Microsoft Flight Simulator airports into X-Plane 12 scenery.
+#[derive(Parser, Debug)]
+#[command(name = "msfs2xp", version, about, long_about = None)]
+pub struct Cli {
+    /// Increase log verbosity (repeatable).
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    #[command(subcommand)]
+    pub cmd: Cmd,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Cmd {
+    /// Convert one or more BGL files, XML files or packages into X-Plane scenery packs.
+    Convert(ConvertArgs),
+    /// List the airports found in the given inputs without writing anything.
+    List(ListArgs),
+    /// Dump the record structure of a BGL file (for reverse engineering).
+    Inspect(InspectArgs),
+    /// Render an HTML/SVG preview of an apt.dat file.
+    Preview(PreviewArgs),
+    /// Check that an apt.dat file is structurally valid.
+    Validate(ValidateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ConvertArgs {
+    /// Inputs: .bgl, .xml, a package folder, a Community/OneStore folder, or auto:2020 / auto:2024.
+    #[arg(required = true)]
+    pub inputs: Vec<String>,
+
+    /// Output directory that will hold the generated scenery pack(s).
+    #[arg(short, long)]
+    pub out: PathBuf,
+
+    /// Only convert these ICAO identifiers (comma separated).
+    #[arg(long, value_delimiter = ',')]
+    pub icao: Vec<String>,
+
+    /// Write every airport into one merged scenery pack.
+    #[arg(long)]
+    pub merge: bool,
+
+    /// Force a record layout instead of detecting it.
+    #[arg(long, default_value = "auto", value_parser = ["auto", "2020", "2024", "fsx", "p3d"])]
+    pub sim: String,
+
+    /// Do not union taxiway/apron polygons (faster, more rows).
+    #[arg(long)]
+    pub no_union: bool,
+
+    /// Do not generate the ATC taxi network.
+    #[arg(long)]
+    pub no_network: bool,
+
+    /// Do not generate painted lines and lights.
+    #[arg(long)]
+    pub no_lines: bool,
+
+    /// Also write a preview.html next to each apt.dat.
+    #[arg(long)]
+    pub preview: bool,
+
+    /// Also write airports.json with the intermediate model.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Number of packages to convert in parallel.
+    #[arg(short, long)]
+    pub jobs: Option<usize>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ListArgs {
+    /// Inputs, as for `convert`.
+    #[arg(required = true)]
+    pub inputs: Vec<String>,
+
+    /// Only list these ICAO identifiers (comma separated).
+    #[arg(long, value_delimiter = ',')]
+    pub icao: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct InspectArgs {
+    /// BGL file to inspect.
+    pub file: PathBuf,
+
+    /// Restrict output to one airport.
+    #[arg(long)]
+    pub icao: Option<String>,
+
+    /// Hex dump unknown records.
+    #[arg(long)]
+    pub hex: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct PreviewArgs {
+    /// apt.dat file to render.
+    pub apt: PathBuf,
+
+    /// Output HTML file.
+    #[arg(short, long)]
+    pub out: PathBuf,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ValidateArgs {
+    /// apt.dat file to check.
+    pub apt: PathBuf,
+}
