@@ -30,19 +30,28 @@ pub struct ObjOptions {
     /// Height in metres added to every vertex, for objects MSFS places above
     /// the ground (DSF placements always sit on the terrain).
     pub offset_y: f32,
+    /// Night texture: X-Plane shows it after dark, like MSFS's day/night
+    /// emissive materials.
+    pub texture_lit: Option<String>,
+    /// Write the model's lights into this object (only one object per model).
+    pub lights: bool,
 }
 
-/// Group a model's meshes by base-colour texture, in a stable order.
-pub fn split_by_texture(model: &Model) -> Vec<(Option<String>, Vec<usize>)> {
-    let mut groups: BTreeMap<Option<String>, Vec<usize>> = BTreeMap::new();
+/// Group a model's meshes by (base texture, night texture), in a stable order.
+/// An object can carry one of each, so glowing materials get their own group
+/// and nothing else samples their night texture.
+pub fn split_by_texture(model: &Model) -> Vec<(Option<String>, Option<String>, Vec<usize>)> {
+    let mut groups: BTreeMap<(Option<String>, Option<String>), Vec<usize>> = BTreeMap::new();
     for (i, mesh) in model.meshes.iter().enumerate() {
         if mesh.indices.is_empty() {
             continue;
         }
-        let tex = model.materials.get(mesh.material).and_then(|m| m.base_color.clone());
-        groups.entry(tex).or_default().push(i);
+        let m = model.materials.get(mesh.material);
+        let tex = m.and_then(|m| m.base_color.clone());
+        let lit = m.filter(|m| m.emissive_strength > 0.0).and_then(|m| m.emissive.clone());
+        groups.entry((tex, lit)).or_default().push(i);
     }
-    groups.into_iter().collect()
+    groups.into_iter().map(|((t, l), v)| (t, l, v)).collect()
 }
 
 /// Render the given meshes of a model as one OBJ8 file.
@@ -86,6 +95,9 @@ pub fn write_obj8(model: &Model, meshes: &[usize], opts: &ObjOptions) -> String 
     out.push_str("I\n800\nOBJ\n\n");
     if let Some(tex) = &opts.texture {
         let _ = writeln!(out, "TEXTURE {tex}");
+    }
+    if let Some(lit) = &opts.texture_lit {
+        let _ = writeln!(out, "TEXTURE_LIT {lit}");
     }
     let _ = writeln!(out, "POINT_COUNTS {} 0 0 {}\n", base, indices.len());
     out.push_str(&vt);
@@ -131,13 +143,40 @@ pub fn write_obj8(model: &Model, meshes: &[usize], opts: &ObjOptions) -> String 
         }
         let _ = writeln!(out, "TRIS {first} {count}");
     }
+    if opts.lights {
+        for l in &model.lights {
+            // Same axis turn as the vertices; the height offset lifts lights too.
+            let (x, y, z) = (
+                -l.pos[0] * scale + 0.0,
+                l.pos[1] * scale + opts.offset_y,
+                -l.pos[2] * scale + 0.0,
+            );
+            let (dx, dy, dz) = (-l.dir[0] + 0.0, l.dir[1] + 0.0, -l.dir[2] + 0.0);
+            // X-Plane's WIDTH is the cosine of half the cone (Laminar's 120 degree
+            // ramp floods use 0.5).
+            let width = ((l.cone_deg.clamp(0.0, 360.0) as f64) / 2.0).to_radians().cos().max(0.0);
+            let [r, g, b] = l.color;
+            if l.spill && !l.flashing {
+                let _ = writeln!(
+                    out,
+                    "LIGHT_PARAM spot_params_sp_pm {x:.3} {y:.3} {z:.3} {r:.3} {g:.3} {b:.3} 1 {:.0}cd {dx:.4} {dy:.4} {dz:.4} {width:.4}",
+                    l.intensity.max(1.0)
+                );
+            }
+            let _ = writeln!(
+                out,
+                "LIGHT_PARAM spot_params_bb_pm {x:.3} {y:.3} {z:.3} {r:.3} {g:.3} {b:.3} {:.0}cd {dx:.4} {dy:.4} {dz:.4} {width:.4}",
+                (l.intensity / 6.0).max(100.0)
+            );
+        }
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model3d::glb::{Material, Mesh, Vertex};
+    use crate::model3d::glb::{LightPoint, Material, Mesh, Vertex};
 
     fn model(n_tris: usize, material: Material) -> Model {
         let mut vertices = Vec::new();
@@ -162,6 +201,7 @@ mod tests {
             }],
             materials: vec![material],
             warnings: vec![],
+            lights: vec![],
         }
     }
 
@@ -182,11 +222,74 @@ mod tests {
                 texture: None,
                 scale: 1.0,
                 offset_y: 5.0,
+                texture_lit: None,
+                lights: false,
             },
         );
         // Model +X becomes object -X, and the height offset lifts every vertex.
         assert!(s.contains("VT -1.0000 6.0000 0.0000 0.0000 0.0000 -1.0000"), "{s}");
         assert!(!s.contains("VT -0.0000"), "no negative zeros: {s}");
+    }
+
+    #[test]
+    fn writes_night_texture_and_lights() {
+        let mut m = model(
+            1,
+            Material {
+                base_color: Some("a.dds".into()),
+                ..Default::default()
+            },
+        );
+        m.lights.push(LightPoint {
+            pos: [1.0, 10.0, 2.0],
+            dir: [0.0, -1.0, 1.0],
+            color: [1.0, 1.0, 1.0],
+            intensity: 7500.0,
+            cone_deg: 120.0,
+            spill: true,
+            flashing: false,
+        });
+        let s = write_obj8(
+            &m,
+            &[0],
+            &ObjOptions {
+                texture: Some("t/a.dds".into()),
+                scale: 1.0,
+                offset_y: 0.0,
+                texture_lit: Some("t/a_lit.dds".into()),
+                lights: true,
+            },
+        );
+        assert!(s.contains("TEXTURE t/a.dds\nTEXTURE_LIT t/a_lit.dds\nPOINT_COUNTS"), "{s}");
+        assert!(
+            s.contains("LIGHT_PARAM spot_params_sp_pm -1.000 10.000 -2.000 1.000 1.000 1.000 1 7500cd 0.0000 -1.0000 -1.0000 0.5000"),
+            "{s}"
+        );
+        assert!(s.contains("LIGHT_PARAM spot_params_bb_pm -1.000 10.000 -2.000"), "{s}");
+    }
+
+    #[test]
+    fn glowing_materials_get_their_own_object() {
+        let mut m = model(
+            1,
+            Material {
+                base_color: Some("a.dds".into()),
+                ..Default::default()
+            },
+        );
+        m.materials.push(Material {
+            base_color: Some("a.dds".into()),
+            emissive: Some("a.dds".into()),
+            emissive_strength: 150.0,
+            ..Default::default()
+        });
+        let mut second = m.meshes[0].clone();
+        second.material = 1;
+        m.meshes.push(second);
+        let groups = split_by_texture(&m);
+        assert_eq!(groups.len(), 2, "same base texture, different night texture");
+        assert!(groups.iter().any(|g| g.1.as_deref() == Some("a.dds") && g.2 == vec![1]));
+        assert!(groups.iter().any(|g| g.1.is_none() && g.2 == vec![0]));
     }
 
     #[test]
@@ -205,6 +308,8 @@ mod tests {
                 texture: Some("textures/a.dds".into()),
                 scale: 2.0,
                 offset_y: 0.0,
+                texture_lit: None,
+                lights: false,
             },
         );
         assert!(s.starts_with("I\n800\nOBJ\n\nTEXTURE textures/a.dds\nPOINT_COUNTS 3 0 0 3\n"));
@@ -256,7 +361,7 @@ mod tests {
         let groups = split_by_texture(&m);
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].0.as_deref(), Some("a.dds"));
-        assert_eq!(groups[0].1, vec![1]);
+        assert_eq!(groups[0].2, vec![1]);
     }
 
     #[test]
@@ -264,7 +369,7 @@ mod tests {
         let glb = crate::model3d::glb::tests::asobo_triangle("");
         let model = crate::model3d::load_glb(&glb).unwrap();
         let groups = split_by_texture(&model);
-        let s = write_obj8(&model, &groups[0].1, &ObjOptions::default());
+        let s = write_obj8(&model, &groups[0].2, &ObjOptions::default());
         assert!(s.contains("POINT_COUNTS 3 0 0 3"));
         assert!(s.contains("ATTR_no_cull"));
     }

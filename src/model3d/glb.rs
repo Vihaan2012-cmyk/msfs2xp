@@ -58,6 +58,9 @@ pub struct Material {
     pub base_color: Option<String>,
     pub normal: Option<String>,
     pub emissive: Option<String>,
+    /// Strongest emissive factor component; 0 when the material does not glow
+    /// (glTF's default emissive factor is black, even with a texture).
+    pub emissive_strength: f32,
     pub base_color_factor: [f32; 4],
     pub alpha: AlphaMode,
     pub alpha_cutoff: f32,
@@ -73,6 +76,7 @@ impl Default for Material {
             base_color: None,
             normal: None,
             emissive: None,
+            emissive_strength: 0.0,
             base_color_factor: [1.0; 4],
             alpha: AlphaMode::Opaque,
             alpha_cutoff: 0.5,
@@ -82,11 +86,30 @@ impl Default for Material {
     }
 }
 
+/// A light MSFS attaches to a model node (`ASOBO_street_light`), in model
+/// space: the beam runs along the node's +Z axis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LightPoint {
+    pub pos: [f32; 3],
+    /// Unit beam direction.
+    pub dir: [f32; 3],
+    pub color: [f32; 3],
+    /// Candela.
+    pub intensity: f32,
+    /// Full cone angle in degrees.
+    pub cone_deg: f32,
+    /// Lights the ground (false for glare-only "flare" lights).
+    pub spill: bool,
+    /// Beacons and strobes; drawn as glare only.
+    pub flashing: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Model {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<Material>,
     pub warnings: Vec<String>,
+    pub lights: Vec<LightPoint>,
 }
 
 impl Model {
@@ -475,6 +498,9 @@ fn material(json: &Value, m: &Value) -> (Material, bool) {
             base_color: texture_file(json, pbr["baseColorTexture"]["index"].as_u64()),
             normal: texture_file(json, m["normalTexture"]["index"].as_u64()),
             emissive: texture_file(json, m["emissiveTexture"]["index"].as_u64()),
+            emissive_strength: floats(&m["emissiveFactor"], 3)
+                .map(|v| v.iter().fold(0.0f64, |a, &x| a.max(x)) as f32)
+                .unwrap_or(0.0),
             base_color_factor: factor,
             alpha: match m["alphaMode"].as_str() {
                 Some("MASK") => AlphaMode::Mask,
@@ -572,6 +598,35 @@ pub fn load_glb(bytes: &[u8]) -> Result<Model, ModelError> {
             for c in children.iter().rev().filter_map(Value::as_u64) {
                 stack.push((c as usize, world, depth + 1));
             }
+        }
+        if let Some(sl) = node["extensions"]["ASOBO_street_light"].as_object() {
+            let num = |k: &str, d: f64| sl.get(k).and_then(Value::as_f64).unwrap_or(d);
+            let pos = transform_point(&world, [0.0, 0.0, 0.0]);
+            let tip = transform_point(&world, [0.0, 0.0, 1.0]);
+            let mut dir = [tip[0] - pos[0], tip[1] - pos[1], tip[2] - pos[2]];
+            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            if len > 1e-6 {
+                for c in &mut dir {
+                    *c /= len;
+                }
+            }
+            let color = sl
+                .get("color")
+                .and_then(Value::as_array)
+                .map(|c| {
+                    let g = |i: usize| c.get(i).and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                    [g(0), g(1), g(2)]
+                })
+                .unwrap_or([1.0; 3]);
+            model.lights.push(LightPoint {
+                pos,
+                dir,
+                color,
+                intensity: num("intensity", 1000.0) as f32,
+                cone_deg: num("cone_angle", 120.0) as f32,
+                spill: !sl.get("flare_only").and_then(Value::as_bool).unwrap_or(false),
+                flashing: num("flash_frequency", 0.0) > 0.0,
+            });
         }
         let Some(mesh_idx) = node["mesh"].as_u64() else {
             continue;

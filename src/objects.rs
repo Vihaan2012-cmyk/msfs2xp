@@ -302,9 +302,21 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 }
                 let offset_y = quarters as f32 / 4.0;
                 let mut files = Vec::new();
-                for (i, (tex, meshes)) in split_by_texture(&model).into_iter().enumerate() {
+                let mut groups = split_by_texture(&model);
+                if groups.is_empty() && !model.lights.is_empty() {
+                    groups.push((None, None, Vec::new())); // a lights-only object
+                }
+                for (i, (tex, lit, meshes)) in groups.into_iter().enumerate() {
                     let texture = tex.as_deref().and_then(&texture_for);
-                    let text = write_obj8(&model, &meshes, &ObjOptions { texture, scale, offset_y });
+                    let texture_lit = lit.as_deref().and_then(&texture_for);
+                    let options = ObjOptions {
+                        texture,
+                        scale,
+                        offset_y,
+                        texture_lit,
+                        lights: i == 0,
+                    };
+                    let text = write_obj8(&model, &meshes, &options);
                     let file = format!("{}{}_{}.obj", safe(&base), suffix, i);
                     std::fs::write(objects_dir.join(&file), text).map_err(|e| e.to_string())?;
                     files.push(format!("objects/{file}"));
