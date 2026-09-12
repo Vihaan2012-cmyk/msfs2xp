@@ -2,7 +2,9 @@
 
 pub mod codec;
 pub mod file;
+pub mod guid;
 pub mod inspect;
+pub mod modellib;
 pub mod reader;
 pub mod records;
 

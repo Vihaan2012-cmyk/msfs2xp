@@ -4,7 +4,8 @@ use crate::bgl::codec::{alt_from_i32, lat_from_u32, lon_from_u32};
 use crate::bgl::file::RecordSlice;
 use crate::bgl::reader::BglError;
 
-use super::raw::{RawCom, RawHelipad, RawStart};
+use super::raw::{RawCom, RawHelipad, RawJetway, RawStart};
+use super::scenery::parse_library_object;
 
 /// Airport / navaid name record: the rest of the record is the string.
 pub fn parse_name(rec: &RecordSlice) -> Result<String, BglError> {
@@ -81,12 +82,25 @@ pub fn parse_helipad(rec: &RecordSlice) -> Result<RawHelipad, BglError> {
     })
 }
 
-/// Jetway: the parking number and gate name it is attached to.
-pub fn parse_jetway(rec: &RecordSlice) -> Result<(u16, u16), BglError> {
+/// Jetway: the stand it serves and, in MSFS, where its model is placed.
+///
+/// Both generations open with the parking number and name code. The MSFS
+/// record (0x00DE) follows them with a u32 length and a complete scenery
+/// library-object record, which is where the jetway's position comes from.
+pub fn parse_jetway(rec: &RecordSlice) -> Result<RawJetway, BglError> {
     let mut r = rec.body();
-    let number = r.u16()?;
-    let name = r.u16().unwrap_or(0);
-    Ok((number, name))
+    let parking_number = r.u16()?;
+    let parking_name = r.u16().unwrap_or(0);
+    // Offset 0x12 is where every sample so far puts the embedded record; scan
+    // nearby in case a later build moves it.
+    let placement = std::iter::once(0x12usize)
+        .chain((0x0Ausize..0x30).step_by(2))
+        .find_map(|at| rec.data.get(at..).and_then(parse_library_object));
+    Ok(RawJetway {
+        parking_number,
+        parking_name,
+        placement,
+    })
 }
 
 #[cfg(test)]
@@ -163,6 +177,60 @@ mod tests {
         assert!(!h.closed);
         assert_eq!(h.length_m, 20.0);
         assert_eq!(h.heading, 45.0);
+    }
+
+    #[test]
+    fn parses_an_msfs_jetway_with_its_embedded_placement() {
+        let guid = [
+            0xA1u8, 0x32, 0xC2, 0xD1, 0x18, 0x85, 0xE4, 0x41, 0x88, 0xD7, 0x8F, 0x5E, 0x15, 0x8E, 0x35, 0xF3,
+        ];
+        let placement = Bytes::new()
+            .u16(0x000B)
+            .u16(64)
+            .pos2(25.2486, 55.3601)
+            .i32(0)
+            .u16(1)
+            .u16(0)
+            .u16(0)
+            .u16(0x4000)
+            .zeros(4)
+            .zeros(16)
+            .raw(&guid)
+            .f32(1.0)
+            .done();
+        let body = Bytes::new()
+            .u16(18)
+            .u16(0x0D)
+            .u16(29)
+            .u16(0)
+            .u32(64)
+            .raw(&placement)
+            .done();
+        let bytes = record(AP_MSFS_JETWAY, &body);
+        let rec = RecordSlice {
+            id: AP_MSFS_JETWAY,
+            offset: 0,
+            data: &bytes,
+        };
+        let j = parse_jetway(&rec).unwrap();
+        assert_eq!((j.parking_number, j.parking_name), (18, 0x0D));
+        let p = j.placement.expect("embedded placement");
+        assert!((p.lat - 25.2486).abs() < 1e-6);
+        assert!((p.heading - 90.0).abs() < 0.01);
+        assert_eq!(p.guid.0, guid);
+    }
+
+    #[test]
+    fn a_legacy_jetway_has_no_placement() {
+        let bytes = record(AP_JETWAY, &Bytes::new().u16(4).u16(0x0C).done());
+        let rec = RecordSlice {
+            id: AP_JETWAY,
+            offset: 0,
+            data: &bytes,
+        };
+        let j = parse_jetway(&rec).unwrap();
+        assert_eq!((j.parking_number, j.parking_name), (4, 0x0C));
+        assert!(j.placement.is_none());
     }
 
     #[test]

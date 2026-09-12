@@ -8,6 +8,7 @@ pub mod layout;
 pub mod msfs;
 pub mod raw;
 pub mod runway;
+pub mod scenery;
 pub mod simple;
 pub mod taxi;
 

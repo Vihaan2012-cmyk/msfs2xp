@@ -1,6 +1,6 @@
 //! The airport record: a fixed head followed by every other airport sub-record.
 
-use crate::bgl::codec::{alt_from_i32, icao_from_u32, lat_from_u32, lon_from_u32, magvar_adjust};
+use crate::bgl::codec::{alt_from_i32, icao_from_u32, icao_from_u64, lat_from_u32, lon_from_u32, magvar_adjust};
 use crate::bgl::file::{RecordSlice, SubRecords};
 use crate::bgl::reader::BglError;
 
@@ -34,6 +34,20 @@ pub fn parse_airport(rec: &RecordSlice, hint: Option<Variant>) -> Result<RawAirp
     ap.region = icao_from_u32(r.u32()?, true);
     ap.fuel_flags = r.u32()?;
     debug_assert_eq!(r.pos(), 6 + HEAD_FS9);
+
+    // MSFS 2024 leaves the 32-bit ident empty and stores the 8-character ident
+    // as a 64-bit value at record offset 0x4C, its low six bits used as flags.
+    let is_2024 = rec.id == REC_AIRPORT_MSFS2024;
+    if is_2024 {
+        if let Some(raw) = data.get(0x4C..0x54) {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(raw);
+            let ident = icao_from_u64(u64::from_le_bytes(b), true);
+            if !ident.is_empty() {
+                ap.ident = ident;
+            }
+        }
+    }
 
     // The MSFS head carries a closed flag that no other generation has.
     let msfs_flags = data.get(6 + HEAD_FS9 + 2).copied().unwrap_or(0);
@@ -70,6 +84,9 @@ pub fn parse_airport(rec: &RecordSlice, hint: Option<Variant>) -> Result<RawAirp
         s if s == 6 + HEAD_P3DV5 => Variant::P3dV5,
         _ => Variant::Msfs2020,
     });
+    if is_2024 && hint.is_none() {
+        ap.variant = Variant::Msfs2024;
+    }
     if ap.variant.is_msfs() {
         ap.closed = msfs_flags & 0x04 != 0;
     }
@@ -185,7 +202,13 @@ pub fn parse_airport(rec: &RecordSlice, hint: Option<Variant>) -> Result<RawAirp
             | AP_MSFS_PAINTED_HATCHED_AREA
             | AP_MSFS_PARKING_MFGR_NAME
             | AP_MSFS_PROJECTED_MESH
-            | AP_MSFS_GROUND_MERGING => {}
+            | AP_MSFS_GROUND_MERGING
+            | AP_MSFS2024_MATERIAL_REF
+            | AP_MSFS2024_UNKNOWN_005D
+            | AP_MSFS2024_UNKNOWN_006A
+            | AP_MSFS2024_UNKNOWN_00FB
+            | AP_MSFS2024_UNKNOWN_00FF
+            | AP_MSFS2024_WASM => {}
             other => ap.unknown_records.push((other, sub.size())),
         }
     }
@@ -361,6 +384,39 @@ mod tests {
 
         let ap = parse_airport(&rec, None).unwrap();
         assert_eq!(ap.variant, Variant::Msfs2020, "without a hint we assume 2020");
+    }
+
+    #[test]
+    fn reads_the_msfs2024_record_and_its_64_bit_ident() {
+        // The common 46-byte head with an empty 32-bit ident, then the 2024
+        // extension: 24 bytes, the 64-bit ident at record offset 0x4C, 8 bytes.
+        let ident64 = ((icao_to_u32("OMDB", false) as u64) << 6) | 1;
+        let mut body = Bytes::new()
+            .zeros(6)
+            .pos(LAT, LON, 8.7)
+            .zeros(12)
+            .f32(357.7)
+            .u32(0)
+            .u32(0)
+            .u32(0)
+            .zeros(24)
+            .done();
+        body.extend_from_slice(&ident64.to_le_bytes());
+        body.extend_from_slice(&[0u8; 8]);
+        assert_eq!(body.len(), 86);
+        body.extend_from_slice(&record(AP_NAME, b"Dubai Intl"));
+        let bytes = record(REC_AIRPORT_MSFS2024, &body);
+        assert_eq!(u64::from_le_bytes(bytes[0x4C..0x54].try_into().unwrap()), ident64);
+        let rec = RecordSlice {
+            id: REC_AIRPORT_MSFS2024,
+            offset: 0,
+            data: &bytes,
+        };
+        let ap = parse_airport(&rec, None).unwrap();
+        assert_eq!(ap.ident, "OMDB");
+        assert_eq!(ap.name, "Dubai Intl");
+        assert_eq!(ap.variant, Variant::Msfs2024);
+        assert!(ap.warnings.is_empty(), "{:?}", ap.warnings);
     }
 
     #[test]

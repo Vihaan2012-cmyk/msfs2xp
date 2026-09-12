@@ -2,7 +2,12 @@
 
 pub mod bgl;
 pub mod cli;
+pub mod convert;
 pub mod geo;
+pub mod model;
+pub mod package;
+pub mod pipeline;
+pub mod xplane;
 
 use anyhow::Context;
 
@@ -36,8 +41,11 @@ pub fn run(cli: cli::Cli) -> anyhow::Result<i32> {
             print!("{text}");
             Ok(0)
         }
-        _ => {
-            eprintln!("not implemented yet");
+        cli::Cmd::Convert(args) => pipeline::run_convert(&args),
+        cli::Cmd::List(args) => pipeline::run_list(&args),
+        cli::Cmd::Validate(args) => pipeline::run_validate(&args),
+        cli::Cmd::Preview(_) => {
+            eprintln!("preview is not implemented yet");
             Ok(2)
         }
     }

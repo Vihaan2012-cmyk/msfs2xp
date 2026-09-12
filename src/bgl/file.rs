@@ -16,6 +16,7 @@
 //! ```
 
 use super::reader::{BglError, Reader};
+use super::records::ids::{REC_AIRPORT, REC_AIRPORT_MSFS2024};
 
 pub const MAGIC1: u32 = 0x1992_0201;
 pub const MAGIC2: u32 = 0x0805_1803;
@@ -222,10 +223,14 @@ impl<'a> BglFile<'a> {
         out
     }
 
-    /// All airport records (section type 0x03, plus the rarely used 0x3C alias).
+    /// Airport records from section 0x03 (and the rarely used 0x3C alias).
+    ///
+    /// MSFS 2024 also keeps other top-level records in the airport section
+    /// (0x005A carries ground polygons), so only the two airport ids are kept.
     pub fn airport_records(&self) -> Vec<RecordSlice<'a>> {
         let mut out = self.records_of(SECTION_AIRPORT);
         out.extend(self.records_of(SECTION_AIRPORT_ALT));
+        out.retain(|r| r.id == REC_AIRPORT || r.id == REC_AIRPORT_MSFS2024);
         out
     }
 
@@ -307,6 +312,19 @@ mod tests {
         assert_eq!(recs[0].id, 0x003C);
         assert_eq!(recs[0].data, &rec_a[..]);
         assert_eq!(recs[1].data, &rec_b[..]);
+    }
+
+    #[test]
+    fn only_airport_record_ids_are_returned() {
+        let data = BglBuilder::new()
+            .section(
+                SECTION_AIRPORT,
+                vec![record(0x0113, &[1]), record(0x005A, &[2, 3]), record(0x003C, &[4])],
+            )
+            .build();
+        let file = BglFile::parse(&data).unwrap();
+        let ids: Vec<u16> = file.airport_records().iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![0x0113, 0x003C]);
     }
 
     #[test]

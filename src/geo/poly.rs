@@ -5,7 +5,7 @@
 //! that z-fight. Unioning them per surface type produces the single outline a
 //! human would have drawn.
 
-use geo::{BooleanOps, Coord, LineString, MultiPolygon, Polygon};
+use geo::{Coord, LineString, MultiPolygon, Polygon};
 
 /// A closed ring of planar points, metres, counter-clockwise.
 pub type Ring = Vec<(f64, f64)>;
@@ -166,14 +166,21 @@ pub fn union(rings: Vec<Ring>) -> Result<Vec<Shape>, String> {
     if usable.is_empty() {
         return Ok(Vec::new());
     }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut acc = MultiPolygon::new(vec![to_geo(usable[0])]);
-        for ring in usable.iter().skip(1) {
-            let other = MultiPolygon::new(vec![to_geo(ring)]);
-            acc = acc.union(&other);
-        }
-        acc
-    }));
+    // One batched union is far faster than folding polygons in one at a time,
+    // which matters when an airport has tens of thousands of apron pieces.
+    // Every input is made counter-clockwise first: the batched union takes the
+    // winding of the first ring as "outer" and would treat the rest as holes.
+    let polygons: Vec<Polygon<f64>> = usable
+        .iter()
+        .map(|r| {
+            let mut r = (*r).clone();
+            if signed_area(&r) < 0.0 {
+                r.reverse();
+            }
+            to_geo(&r)
+        })
+        .collect();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| geo::unary_union(&polygons)));
     match result {
         Ok(mp) => Ok(from_geo(mp)),
         Err(_) => Err("polygon union failed on degenerate geometry".to_string()),

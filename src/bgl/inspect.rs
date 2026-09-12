@@ -63,11 +63,6 @@ pub fn inspect(data: &[u8], icao: Option<&str>, opts: InspectOptions) -> String 
         } else {
             String::new()
         };
-        if let Some(want) = icao {
-            if !ident.eq_ignore_ascii_case(want) {
-                continue;
-            }
-        }
         let lon = lon_from_u32(u32::from_le_bytes([
             rec.data[12],
             rec.data[13],
@@ -84,6 +79,17 @@ pub fn inspect(data: &[u8], icao: Option<&str>, opts: InspectOptions) -> String 
 
         let parsed = parse_airport(&rec, None).ok();
         let variant = parsed.as_ref().map(|a| a.variant).unwrap_or_default();
+        // MSFS 2024 moved the ident out of the common head, so prefer the parser's.
+        let ident = parsed
+            .as_ref()
+            .map(|a| a.ident.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(ident);
+        if let Some(want) = icao {
+            if !ident.eq_ignore_ascii_case(want) {
+                continue;
+            }
+        }
         let _ = writeln!(
             out,
             "\nAIRPORT {ident} at {lat:.6},{lon:.6}  offset 0x{:X}  size {}  layout {}",

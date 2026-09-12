@@ -2,3 +2,4 @@
 /out
 **/*.rs.bk
 Cargo.lock
+/Test Airports/

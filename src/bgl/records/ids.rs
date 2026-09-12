@@ -7,6 +7,8 @@
 
 // Top level records
 pub const REC_AIRPORT: u16 = 0x003C;
+/// MSFS 2024 airport record: the 0x003C body plus 24 bytes, ident moved to a 64-bit field.
+pub const REC_AIRPORT_MSFS2024: u16 = 0x0113;
 
 // Airport sub-records
 pub const AP_NAME: u16 = 0x0019;
@@ -60,6 +62,15 @@ pub const AP_MSFS_PARKING_MFGR_NAME: u16 = 0x00DD;
 pub const AP_MSFS_JETWAY: u16 = 0x00DE;
 pub const AP_MSFS_PROJECTED_MESH: u16 = 0x00E8;
 pub const AP_MSFS_GROUND_MERGING: u16 = 0x00E9;
+
+// MSFS 2024 airport sub-records seen in iniBuilds packages. None carry data the
+// conversion needs: 0x005C/0x005D are GUID references, 0x0102 names a WASM module.
+pub const AP_MSFS2024_MATERIAL_REF: u16 = 0x005C;
+pub const AP_MSFS2024_UNKNOWN_005D: u16 = 0x005D;
+pub const AP_MSFS2024_UNKNOWN_006A: u16 = 0x006A;
+pub const AP_MSFS2024_UNKNOWN_00FB: u16 = 0x00FB;
+pub const AP_MSFS2024_UNKNOWN_00FF: u16 = 0x00FF;
+pub const AP_MSFS2024_WASM: u16 = 0x0102;
 
 // Runway sub-records
 pub const RW_OFFSET_THRESHOLD_PRIM: u16 = 0x0005;
@@ -136,6 +147,12 @@ pub fn is_airport_subrecord(id: u16) -> bool {
             | AP_MSFS_JETWAY
             | AP_MSFS_PROJECTED_MESH
             | AP_MSFS_GROUND_MERGING
+            | AP_MSFS2024_MATERIAL_REF
+            | AP_MSFS2024_UNKNOWN_005D
+            | AP_MSFS2024_UNKNOWN_006A
+            | AP_MSFS2024_UNKNOWN_00FB
+            | AP_MSFS2024_UNKNOWN_00FF
+            | AP_MSFS2024_WASM
     )
 }
 
@@ -212,6 +229,11 @@ pub fn airport_subrecord_name(id: u16) -> &'static str {
         AP_MSFS_JETWAY => "JETWAY_MSFS",
         AP_MSFS_PROJECTED_MESH => "PROJECTED_MESH",
         AP_MSFS_GROUND_MERGING => "GROUND_MERGING",
+        AP_MSFS2024_MATERIAL_REF => "MSFS2024_MATERIAL_REF",
+        AP_MSFS2024_WASM => "MSFS2024_WASM",
+        AP_MSFS2024_UNKNOWN_005D | AP_MSFS2024_UNKNOWN_006A | AP_MSFS2024_UNKNOWN_00FB | AP_MSFS2024_UNKNOWN_00FF => {
+            "MSFS2024_UNUSED"
+        }
         _ => "UNKNOWN",
     }
 }

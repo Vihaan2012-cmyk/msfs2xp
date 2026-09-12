@@ -63,13 +63,22 @@ pub struct RawAirport {
     pub apron_edge_lights: Vec<Vec<(f64, f64)>>,
     pub painted_lines: Vec<RawPaintedLine>,
     pub signs: Vec<RawSign>,
-    /// `(parking number, parking name code)` pairs from jetway records.
-    pub jetways: Vec<(u16, u16)>,
+    pub jetways: Vec<RawJetway>,
     pub delete_airport: bool,
     pub variant: Variant,
     pub warnings: Vec<String>,
     /// `(record id, byte size)` of records we chose not to interpret.
     pub unknown_records: Vec<(u16, usize)>,
+}
+
+/// A jetway: the stand it serves and, when recorded, where its model sits.
+#[derive(Debug, Clone, Default)]
+pub struct RawJetway {
+    pub parking_number: u16,
+    /// Parking name code (GATE_A and so on). Needed because stand numbers
+    /// repeat across piers.
+    pub parking_name: u16,
+    pub placement: Option<super::scenery::RawPlacement>,
 }
 
 #[derive(Debug, Clone, Default)]
