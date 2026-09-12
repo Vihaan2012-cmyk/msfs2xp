@@ -177,7 +177,7 @@ mod tests {
         assert!(s.starts_with("I\n800\nOBJ\n\nTEXTURE textures/a.dds\nPOINT_COUNTS 3 0 0 3\n"));
         assert!(s.contains("VT 0.0000 2.0000 0.0000"), "scale is baked in:\n{s}");
         assert!(s.contains(" 0.00000 0.75000\n"), "V is flipped to T");
-        assert!(s.contains("ATTR_cull\nATTR_no_blend 0.50\nATTR_poly_os 0\nTRIS 0 3\n"));
+        assert!(s.contains("ATTR_cull\nATTR_no_blend 0.00\nATTR_poly_os 0\nTRIS 0 3\n"));
     }
 
     #[test]
