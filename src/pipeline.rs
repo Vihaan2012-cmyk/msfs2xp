@@ -219,6 +219,9 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
             all.extend(pairs);
         }
         emit(pack_folder_name("msfs2xp merged airports"), all, titles, problems)?;
+        if !args.no_objects {
+            eprintln!("note: --merge writes airport layouts only; run without --merge to convert buildings");
+        }
     } else {
         for (loaded, pairs) in results {
             for p in &loaded.problems {
@@ -231,7 +234,41 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                 eprintln!("note: {} contains no convertible airport", loaded.source.name);
             }
             let title = loaded.source.display_name();
-            emit(pack_folder_name(&title), pairs, vec![title], loaded.problems)?;
+            let has_airports = !pairs.is_empty();
+            let folder = pack_folder_name(&title);
+            emit(folder.clone(), pairs, vec![title], loaded.problems.clone())?;
+            if has_airports && !args.no_objects {
+                let dir = args.out.join(&folder);
+                let began = Instant::now();
+                let opts = crate::objects::ObjectOptions {
+                    lod: args.lod,
+                    max_triangles: args.max_tris,
+                };
+                match crate::objects::build(&loaded, &dir, &opts) {
+                    Ok(r) => {
+                        println!(
+                            "  objects: {} of {} placements from {} models: {} object files, {} textures, {:.1}M triangles, {} DSF tile(s), {:.0}s",
+                            r.placed,
+                            r.placements,
+                            r.models_converted,
+                            r.object_files,
+                            r.textures_written,
+                            r.triangles as f64 / 1e6,
+                            r.dsf_tiles.len(),
+                            began.elapsed().as_secs_f64()
+                        );
+                        if r.not_in_package > 0 || !r.failed_models.is_empty() {
+                            println!(
+                                "  objects: {} placements use stock MSFS models (not in the package); {} models failed",
+                                r.not_in_package,
+                                r.failed_models.len()
+                            );
+                        }
+                        std::fs::write(dir.join("msfs2xp-objects.json"), serde_json::to_string_pretty(&r)?)?;
+                    }
+                    Err(e) => eprintln!("warning: objects for {folder} failed: {e:#}"),
+                }
+            }
         }
     }
 

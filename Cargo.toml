@@ -13,6 +13,7 @@ geo = "0.30"
 gltf = { version = "1", features = ["extras", "names", "utils"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 indicatif = "0.17"
+md-5 = "0.10"
 rayon = "1"
 roxmltree = "0.20"
 ruzstd = "0.8"

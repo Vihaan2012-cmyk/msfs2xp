@@ -75,6 +75,18 @@ pub struct ConvertArgs {
     /// Number of packages to convert in parallel.
     #[arg(short, long)]
     pub jobs: Option<usize>,
+
+    /// Skip converting the 3D buildings and other placed objects.
+    #[arg(long)]
+    pub no_objects: bool,
+
+    /// Model level of detail to convert; 0 is the most detailed.
+    #[arg(long, default_value_t = 0)]
+    pub lod: usize,
+
+    /// Step down to coarser model LODs until each model has at most this many triangles.
+    #[arg(long, default_value_t = 100_000)]
+    pub max_tris: usize,
 }
 
 #[derive(clap::Args, Debug)]

@@ -7,6 +7,7 @@ pub mod geo;
 pub mod materials;
 pub mod model;
 pub mod model3d;
+pub mod objects;
 pub mod package;
 pub mod pipeline;
 pub mod texture;
