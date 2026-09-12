@@ -19,7 +19,8 @@ use crate::bgl::records::scenery::RawPlacement;
 use crate::model3d::{load_glb, split_by_texture, write_obj8, ObjOptions};
 use crate::package::Loaded;
 use crate::texture;
-use crate::xplane::dsf::{self, Placement};
+use crate::decals::{self, DecalKind};
+use crate::xplane::dsf::{self, DrapedPolygon, Placement};
 
 /// What the building stage did.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -39,6 +40,9 @@ pub struct ObjectsReport {
     pub missing_models: Vec<(String, usize)>,
     pub failed_models: Vec<String>,
     pub missing_textures: Vec<String>,
+    /// Textured apron markings draped over the pavement.
+    pub decals: usize,
+    pub missing_decal_textures: Vec<String>,
     pub dsf_tiles: Vec<String>,
 }
 
@@ -133,7 +137,9 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         placements: loaded.placements.len(),
         ..Default::default()
     };
-    if loaded.placements.is_empty() {
+    let decal_list: Vec<decals::DecalPolygon> =
+        loaded.airports.iter().flat_map(|a| decals::airport_decals(&a.aprons)).collect();
+    if loaded.placements.is_empty() && decal_list.is_empty() {
         return Ok(report);
     }
     let mut catalog = ModelCatalog::default();
@@ -151,16 +157,24 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     // 2024 streams its own, but an MSFS 2020 install keeps the shared generic
     // libraries (hangars, buildings, props) on disk, so use those when present.
     // They are added after the package's libraries, which therefore win.
+    // Stock packages: model libraries (for placed stock models) and material
+    // libraries, whose textures some decals use (O'Hare's asphalt decals point
+    // at Asobo's shared DECALASPHALT02 texture).
     let mut stock_dirs: Vec<PathBuf> = Vec::new();
-    if loaded.placements.iter().any(|p| !package_guids.contains(&p.guid)) {
-        for official in crate::materials::stock_official_dirs() {
-            let Ok(entries) = std::fs::read_dir(&official) else { continue };
-            for e in entries.filter_map(Result::ok) {
-                if e.file_name().to_string_lossy().to_ascii_lowercase().contains("modellib") {
-                    stock_dirs.push(e.path());
-                }
+    let mut stock_texture_dirs: Vec<PathBuf> = Vec::new();
+    for official in crate::materials::stock_official_dirs() {
+        let Ok(entries) = std::fs::read_dir(&official) else { continue };
+        for e in entries.filter_map(Result::ok) {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.contains("modellib") {
+                stock_dirs.push(e.path());
+                stock_texture_dirs.push(e.path());
+            } else if name.contains("material") {
+                stock_texture_dirs.push(e.path());
             }
         }
+    }
+    if loaded.placements.iter().any(|p| !package_guids.contains(&p.guid)) {
         for dir in &stock_dirs {
             for f in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
                 if f.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("bgl")) {
@@ -229,7 +243,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     std::fs::create_dir_all(&textures_dir)?;
     // Stock textures first, then the package's own, so the package wins.
     let mut textures: HashMap<String, PathBuf> = HashMap::new();
-    for dir in &stock_dirs {
+    for dir in &stock_texture_dirs {
         textures.extend(texture_index(dir));
     }
     textures.extend(texture_index(&loaded.source.root));
@@ -337,8 +351,52 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         }
     }
 
+    // Decals: convert each texture once, write one .pol per texture, placement
+    // mode and layer, and drape the polygons in the package's drawing order.
+    let decal_dir = objects_dir.join("decals");
+    let mut polygon_defs: Vec<String> = Vec::new();
+    let mut def_of: HashMap<(String, bool, bool), usize> = HashMap::new();
+    let mut draped: Vec<DrapedPolygon> = Vec::new();
+    let mut missing_decals: HashSet<String> = HashSet::new();
+    for d in &decal_list {
+        let grime = d.kind == DecalKind::Grime;
+        let key = (d.texture.to_ascii_lowercase(), d.stretched, grime);
+        let def = match def_of.get(&key) {
+            Some(&i) => Some(i),
+            None => match texture_for(&d.texture) {
+                Some(rel) => {
+                    std::fs::create_dir_all(&decal_dir)?;
+                    let file = format!(
+                        "{}_{}_{}.pol",
+                        texture_stem(&d.texture),
+                        if d.stretched { "fit" } else { "tile" },
+                        if grime { "grime" } else { "mark" }
+                    );
+                    std::fs::write(decal_dir.join(&file), decals::pol_text(&format!("../{rel}"), d.stretched, d.kind))?;
+                    polygon_defs.push(format!("objects/decals/{file}"));
+                    def_of.insert(key, polygon_defs.len() - 1);
+                    Some(polygon_defs.len() - 1)
+                }
+                None => {
+                    missing_decals.insert(d.texture.clone());
+                    None
+                }
+            },
+        };
+        if let Some(def) = def {
+            draped.push(DrapedPolygon {
+                def,
+                points: d.points.clone(),
+            });
+        }
+    }
+    report.decals = draped.len();
+    let mut missing_decals: Vec<String> = missing_decals.into_iter().collect();
+    missing_decals.sort();
+    report.missing_decal_textures = missing_decals;
+
     let nav = pack_dir.join("Earth nav data");
-    for (rel, bytes) in dsf::build_tiles(&object_paths, &placements, "msfs2xp") {
+    for (rel, bytes) in dsf::build_tiles(&object_paths, &placements, &polygon_defs, &draped, "msfs2xp") {
         let path = nav.join(&rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

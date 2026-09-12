@@ -485,6 +485,11 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
             material_guid: a.material,
             material_name: None,
             tint: a.tint,
+            flags: a.flags,
+            uv_scale: a.uv_scale,
+            uv_rotation: a.uv_rotation,
+            priority: a.priority,
+            decal_texture: None,
         })
         .collect();
 

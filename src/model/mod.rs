@@ -431,6 +431,15 @@ pub struct Apron {
     pub material_name: Option<String>,
     /// RGBA tint MSFS multiplies into the material.
     pub tint: [u8; 4],
+    /// MSFS apron flag byte; bit 0x80 stretches a decal texture over the shape.
+    pub flags: u8,
+    /// Decal texture repeat size in metres and rotation in radians.
+    pub uv_scale: f32,
+    pub uv_rotation: f32,
+    /// Draw order: lower values are painted first.
+    pub priority: u32,
+    /// Decal texture file name, once the material is resolved.
+    pub decal_texture: Option<String>,
 }
 
 /// Painted ground marking style, as named in the MSFS scenery editor.

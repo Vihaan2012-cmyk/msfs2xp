@@ -31,6 +31,16 @@ pub fn parse_apron(rec: &RecordSlice, near: &Near, warnings: &mut Vec<String>) -
         None
     };
 
+    // Decal texture placement, MSFS layout only: repeat size, rotation, and
+    // draw order. Verified against O'Hare: runway-number decals point along
+    // their runway to 0.1 degrees with up = -rotation.
+    let f32_at = |at: usize| f32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+    let (uv_scale, uv_rotation, priority) = if material.is_some() && data.len() >= 44 {
+        (f32_at(28), f32_at(32), u32::from_le_bytes([data[40], data[41], data[42], data[43]]))
+    } else {
+        (0.0, 0.0, 0)
+    };
+
     let found = find_vertex_run(data, near, 3);
     let (at, count) = match found {
         Some(v) => v,
@@ -44,6 +54,9 @@ pub fn parse_apron(rec: &RecordSlice, near: &Near, warnings: &mut Vec<String>) -
                 flags,
                 tint,
                 material,
+                uv_scale,
+                uv_rotation,
+                priority,
             });
         }
     };
@@ -63,6 +76,9 @@ pub fn parse_apron(rec: &RecordSlice, near: &Near, warnings: &mut Vec<String>) -
         flags,
         tint,
         material,
+        uv_scale,
+        uv_rotation,
+        priority,
     })
 }
 

@@ -23,6 +23,8 @@ use crate::model::{Airport, Surface};
 pub struct MaterialInfo {
     pub name: String,
     pub surface_type: String,
+    /// File name of the decal texture (binding MTL_BITMAP_DECAL0), if any.
+    pub decal_texture: Option<String>,
 }
 
 /// Every material we could find, keyed by GUID.
@@ -58,11 +60,18 @@ impl MaterialCatalog {
             let Some(guid) = node.attribute("Guid").and_then(|g| g.parse::<Guid>().ok()) else {
                 continue;
             };
+            let decal_texture = node
+                .descendants()
+                .filter(|t| t.has_tag_name("Texture"))
+                .find(|t| t.attribute("Binding") == Some("MTL_BITMAP_DECAL0"))
+                .and_then(|t| t.attribute("FileName"))
+                .map(|f| f.rsplit(|c: char| c == '/' || c as u32 == 92).next().unwrap_or(f).to_string());
             self.insert(
                 guid,
                 MaterialInfo {
                     name: node.attribute("Name").unwrap_or_default().to_string(),
                     surface_type: node.attribute("SurfaceType").unwrap_or_default().to_string(),
+                    decal_texture,
                 },
             );
             n += 1;
@@ -271,6 +280,7 @@ pub fn resolve_airport(ap: &mut Airport, catalog: &MaterialCatalog) -> ResolveSt
         match catalog.get(&guid) {
             Some(info) => {
                 a.material_name = Some(info.name.clone());
+                a.decal_texture = info.decal_texture.clone();
                 match classify_ground(info) {
                     GroundClass::Pavement(s) => a.surface = s,
                     GroundClass::Decal => a.draw = false,
@@ -307,6 +317,7 @@ mod tests {
         MaterialInfo {
             name: name.into(),
             surface_type: surface.into(),
+            decal_texture: None,
         }
     }
 

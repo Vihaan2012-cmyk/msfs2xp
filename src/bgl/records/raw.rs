@@ -218,6 +218,13 @@ pub struct RawApron {
     /// RGBA tint multiplied into the material.
     pub tint: [u8; 4],
     pub material: Option<Guid>,
+    /// Texture repeat size in metres for tiled decals (MSFS layout, offset 28).
+    pub uv_scale: f32,
+    /// Texture rotation in radians, counter-clockwise (offset 32): the
+    /// texture's "up" points along the compass heading `-uv_rotation`.
+    pub uv_rotation: f32,
+    /// Draw order (offset 40): lower values are painted first.
+    pub priority: u32,
 }
 
 #[derive(Debug, Clone, Default)]

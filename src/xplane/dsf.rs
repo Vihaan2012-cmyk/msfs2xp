@@ -31,6 +31,15 @@ pub struct Placement {
     pub object: usize,
 }
 
+/// A textured polygon draped on the ground, with explicit texture coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrapedPolygon {
+    /// Index into the polygon definition (.pol) list.
+    pub def: usize,
+    /// `(lon, lat, s, t)` per vertex, counter-clockwise, not closed.
+    pub points: Vec<(f64, f64, f64, f64)>,
+}
+
 /// Cell size used to group points into pools, in degrees.
 const CELL_DEG: f64 = 0.05;
 
@@ -97,8 +106,30 @@ fn plane_range(min: f64, max: f64) -> (f64, f64) {
     (scale as f64, offset as f64)
 }
 
+/// Select a definition (object or polygon) for the commands that follow.
+fn push_def(cmds: &mut Vec<u8>, def: usize) {
+    if def <= u8::MAX as usize {
+        cmds.push(3);
+        cmds.push(def as u8);
+    } else if def <= u16::MAX as usize {
+        cmds.push(4);
+        cmds.extend_from_slice(&(def as u16).to_le_bytes());
+    } else {
+        cmds.push(5);
+        cmds.extend_from_slice(&(def as u32).to_le_bytes());
+    }
+}
+
 /// Build one DSF tile's bytes.
-pub fn build_tile(south: i32, west: i32, objects: &[String], placements: &[Placement], agent: &str) -> Vec<u8> {
+pub fn build_tile(
+    south: i32,
+    west: i32,
+    objects: &[String],
+    placements: &[Placement],
+    polygon_defs: &[String],
+    polygons: &[DrapedPolygon],
+    agent: &str,
+) -> Vec<u8> {
     // Group placements into cells, then each cell into chunks of at most
     // 65 535 points (the pool index limit).
     let mut cells: BTreeMap<(i64, i64), Vec<Placement>> = BTreeMap::new();
@@ -134,7 +165,7 @@ pub fn build_tile(south: i32, west: i32, objects: &[String], placements: &[Place
     let mut defn = Vec::new();
     defn.extend(atom(b"TERT", &[]));
     defn.extend(atom(b"OBJT", &string_table(objects)));
-    defn.extend(atom(b"POLY", &[]));
+    defn.extend(atom(b"POLY", &string_table(polygon_defs)));
     defn.extend(atom(b"NETW", &[]));
     defn.extend(atom(b"DEMN", &[]));
     let defn = atom(b"DEFN", &defn);
@@ -198,6 +229,80 @@ pub fn build_tile(south: i32, west: i32, objects: &[String], placements: &[Place
             i = j;
         }
     }
+    // Draped polygons: pools of (lon, lat, s, t), one polygon range each, with
+    // parameter 65535 meaning explicit texture coordinates (as X-Plane's own
+    // scenery does). Order is kept: X-Plane paints a layer in file order.
+    let mut poly_cells: BTreeMap<(i64, i64), Vec<&DrapedPolygon>> = BTreeMap::new();
+    for p in polygons {
+        if p.points.len() < 3 || p.def >= polygon_defs.len() {
+            continue;
+        }
+        let (lon, lat) = (p.points[0].0, p.points[0].1);
+        let key = ((lat / CELL_DEG).floor() as i64, (lon / CELL_DEG).floor() as i64);
+        poly_cells.entry(key).or_default().push(p);
+    }
+    let mut pool_index = pools.len();
+    for (_, list) in poly_cells {
+        let mut start = 0;
+        while start < list.len() {
+            // Fill a pool with whole polygons, at most 65 535 points.
+            let (mut end, mut n) = (start, 0usize);
+            while end < list.len() && n + list[end].points.len() <= 65_535 {
+                n += list[end].points.len();
+                end += 1;
+            }
+            if end == start {
+                start += 1; // a single polygon too large for any pool
+                continue;
+            }
+            let chunk = &list[start..end];
+            let pts: Vec<(f64, f64, f64, f64)> = chunk.iter().flat_map(|p| p.points.iter().copied()).collect();
+            let range = |f: fn(&(f64, f64, f64, f64)) -> f64| {
+                let (a, b) = pts.iter().map(f).fold((f64::MAX, f64::MIN), |(a, b), x| (a.min(x), b.max(x)));
+                plane_range(a, b)
+            };
+            let planes = [range(|q| q.0), range(|q| q.1), range(|q| q.2), range(|q| q.3)];
+            let mut data = Vec::with_capacity(5 + pts.len() * 8 + 4);
+            data.extend_from_slice(&(pts.len() as u32).to_le_bytes());
+            data.push(4); // planes
+            for (k, &(scale, offset)) in planes.iter().enumerate() {
+                data.push(0); // raw encoding
+                for q in &pts {
+                    let v = match k {
+                        0 => q.0,
+                        1 => q.1,
+                        2 => q.2,
+                        _ => q.3,
+                    };
+                    data.extend_from_slice(&quantise(v, offset, scale).to_le_bytes());
+                }
+            }
+            geod.extend(atom(b"POOL", &data));
+            let mut scal = Vec::with_capacity(32);
+            for (scale, offset) in planes {
+                scal.extend_from_slice(&(scale as f32).to_le_bytes());
+                scal.extend_from_slice(&(offset as f32).to_le_bytes());
+            }
+            geod.extend(atom(b"SCAL", &scal));
+            cmds.push(1);
+            cmds.extend_from_slice(&(pool_index as u16).to_le_bytes());
+            let (mut current, mut first) = (usize::MAX, 0usize);
+            for p in chunk {
+                if p.def != current {
+                    push_def(&mut cmds, p.def);
+                    current = p.def;
+                }
+                let last = first + p.points.len();
+                cmds.push(13); // polygon range: parameter, first, last + 1
+                cmds.extend_from_slice(&65_535u16.to_le_bytes());
+                cmds.extend_from_slice(&(first as u16).to_le_bytes());
+                cmds.extend_from_slice(&(last as u16).to_le_bytes());
+                first = last;
+            }
+            pool_index += 1;
+            start = end;
+        }
+    }
     let geod = atom(b"GEOD", &geod);
     let dems = atom(b"DEMS", &[]);
     let cmds = atom(b"CMDS", &cmds);
@@ -213,17 +318,32 @@ pub fn build_tile(south: i32, west: i32, objects: &[String], placements: &[Place
     out
 }
 
-/// Split placements by tile and build every tile, returning `(relative path, bytes)`.
-pub fn build_tiles(objects: &[String], placements: &[Placement], agent: &str) -> Vec<(PathBuf, Vec<u8>)> {
-    let mut by_tile: BTreeMap<(i32, i32), Vec<Placement>> = BTreeMap::new();
+/// Split placements and draped polygons by tile and build every tile,
+/// returning `(relative path, bytes)`. A polygon goes to its first point's tile.
+pub fn build_tiles(
+    objects: &[String],
+    placements: &[Placement],
+    polygon_defs: &[String],
+    polygons: &[DrapedPolygon],
+    agent: &str,
+) -> Vec<(PathBuf, Vec<u8>)> {
+    type TileContent = (Vec<Placement>, Vec<DrapedPolygon>);
+    let mut by_tile: BTreeMap<(i32, i32), TileContent> = BTreeMap::new();
     for p in placements {
         if p.lat.is_finite() && p.lon.is_finite() && p.object < objects.len() {
-            by_tile.entry(tile_of(p.lat, p.lon)).or_default().push(*p);
+            by_tile.entry(tile_of(p.lat, p.lon)).or_default().0.push(*p);
+        }
+    }
+    for p in polygons {
+        if let Some(&(lon, lat, _, _)) = p.points.first() {
+            if lat.is_finite() && lon.is_finite() && p.def < polygon_defs.len() {
+                by_tile.entry(tile_of(lat, lon)).or_default().1.push(p.clone());
+            }
         }
     }
     by_tile
         .into_iter()
-        .map(|((s, w), list)| (tile_path(s, w), build_tile(s, w, objects, &list, agent)))
+        .map(|((s, w), (pl, po))| (tile_path(s, w), build_tile(s, w, objects, &pl, polygon_defs, &po, agent)))
         .collect()
 }
 
@@ -237,6 +357,9 @@ pub(crate) mod tests {
         pub props: Vec<(String, String)>,
         pub objects: Vec<String>,
         pub placements: Vec<(f64, f64, f64, usize)>,
+        pub polygon_defs: Vec<String>,
+        /// (definition, parameter, points as plane values)
+        pub polygons: Vec<(usize, u16, Vec<Vec<f64>>)>,
     }
 
     fn atoms(data: &[u8]) -> Vec<([u8; 4], &[u8])> {
@@ -272,8 +395,9 @@ pub(crate) mod tests {
         let props = kv.chunks(2).map(|c| (c[0].clone(), c[1].clone())).collect();
         let defn = atoms(find(b"DEFN"));
         let objects = strings(defn.iter().find(|(i, _)| i == b"OBJT").unwrap().1);
+        let polygon_defs = strings(defn.iter().find(|(i, _)| i == b"POLY").unwrap().1);
         let geod = atoms(find(b"GEOD"));
-        let mut pools: Vec<Vec<[f64; 3]>> = Vec::new();
+        let mut pools: Vec<Vec<Vec<f64>>> = Vec::new();
         let mut raw_pools: Vec<(usize, Vec<Vec<u16>>)> = Vec::new();
         for (id, b) in &geod {
             if id == b"POOL" {
@@ -293,13 +417,7 @@ pub(crate) mod tests {
                 let f = |k: usize| f32::from_le_bytes([b[4 * k], b[4 * k + 1], b[4 * k + 2], b[4 * k + 3]]) as f64;
                 pools.push(
                     (0..*n)
-                        .map(|i| {
-                            [
-                                vals[0][i] as f64 / 65_535.0 * f(0) + f(1),
-                                vals[1][i] as f64 / 65_535.0 * f(2) + f(3),
-                                vals[2][i] as f64 / 65_535.0 * f(4) + f(5),
-                            ]
-                        })
+                        .map(|i| (0..vals.len()).map(|k| vals[k][i] as f64 / 65_535.0 * f(2 * k) + f(2 * k + 1)).collect())
                         .collect(),
                 );
             }
@@ -307,6 +425,7 @@ pub(crate) mod tests {
         let cmds = find(b"CMDS");
         let (mut pool, mut def, mut at) = (0usize, 0usize, 0usize);
         let mut placements = Vec::new();
+        let mut polygons = Vec::new();
         while at < cmds.len() {
             match cmds[at] {
                 1 => {
@@ -320,6 +439,17 @@ pub(crate) mod tests {
                 4 => {
                     def = u16::from_le_bytes([cmds[at + 1], cmds[at + 2]]) as usize;
                     at += 3;
+                }
+                5 => {
+                    def = u32::from_le_bytes([cmds[at + 1], cmds[at + 2], cmds[at + 3], cmds[at + 4]]) as usize;
+                    at += 5;
+                }
+                13 => {
+                    let param = u16::from_le_bytes([cmds[at + 1], cmds[at + 2]]);
+                    let a = u16::from_le_bytes([cmds[at + 3], cmds[at + 4]]) as usize;
+                    let b = u16::from_le_bytes([cmds[at + 5], cmds[at + 6]]) as usize;
+                    polygons.push((def, param, pools[pool][a..b].to_vec()));
+                    at += 7;
                 }
                 8 => {
                     let a = u16::from_le_bytes([cmds[at + 1], cmds[at + 2]]) as usize;
@@ -336,7 +466,35 @@ pub(crate) mod tests {
             props,
             objects,
             placements,
+            polygon_defs,
+            polygons,
         }
+    }
+
+    #[test]
+    fn round_trips_draped_polygons_with_texture_coordinates() {
+        let defs = vec!["objects/decals/a.pol".to_string()];
+        let square = DrapedPolygon {
+            def: 0,
+            points: vec![
+                (-87.9, 41.97, 0.0, 1.0),
+                (-87.8999, 41.97, 10.0, 1.0),
+                (-87.8999, 41.97004, 10.0, 0.125),
+                (-87.9, 41.97004, 0.0, 0.125),
+            ],
+        };
+        let parsed = parse(&build_tile(41, -88, &[], &[], &defs, std::slice::from_ref(&square), "test"));
+        assert_eq!(parsed.polygon_defs, defs);
+        assert_eq!(parsed.polygons.len(), 1);
+        let (def, param, pts) = &parsed.polygons[0];
+        assert_eq!((*def, *param), (0, 65_535), "explicit texture coordinates");
+        assert_eq!(pts.len(), 4);
+        for (got, want) in pts.iter().zip(&square.points) {
+            assert!((got[0] - want.0).abs() < 1e-6 && (got[1] - want.1).abs() < 1e-6, "{got:?}");
+            assert!((got[2] - want.2).abs() < 1e-3 && (got[3] - want.3).abs() < 1e-3, "{got:?} vs {want:?}");
+        }
+        let tiles = build_tiles(&[], &[], &defs, &[square], "test");
+        assert_eq!(tiles.len(), 1, "a tile holding only polygons is still written");
     }
 
     #[test]
@@ -370,7 +528,7 @@ pub(crate) mod tests {
                 object: 1,
             },
         ];
-        let tile = build_tile(25, 55, &objects, &placements, "test");
+        let tile = build_tile(25, 55, &objects, &placements, &[], &[], "test");
         let parsed = parse(&tile);
         assert_eq!(parsed.objects, objects);
         assert!(parsed.props.contains(&("sim/west".into(), "55".into())));
@@ -416,7 +574,7 @@ pub(crate) mod tests {
                 object: 0,
             },
         ];
-        let tiles = build_tiles(&objects, &placements, "test");
+        let tiles = build_tiles(&objects, &placements, &[], &[], "test");
         assert_eq!(tiles.len(), 2);
         assert_eq!(tiles[0].0, Path::new("+40-090").join("+41-088.dsf"));
         assert_eq!(parse(&tiles[1].1).placements.len(), 1);
@@ -433,7 +591,7 @@ pub(crate) mod tests {
                 object: i,
             })
             .collect();
-        let parsed = parse(&build_tile(25, 55, &objects, &placements, "test"));
+        let parsed = parse(&build_tile(25, 55, &objects, &placements, &[], &[], "test"));
         assert_eq!(parsed.placements.len(), 300);
         assert!(parsed.placements.iter().any(|p| p.3 == 299));
     }

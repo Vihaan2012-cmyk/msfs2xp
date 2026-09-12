@@ -265,6 +265,13 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                                 r.failed_models.len()
                             );
                         }
+                        if r.decals > 0 || !r.missing_decal_textures.is_empty() {
+                            println!(
+                                "  decals: {} textured markings draped over the pavement ({} decal textures missing)",
+                                r.decals,
+                                r.missing_decal_textures.len()
+                            );
+                        }
                         std::fs::write(dir.join("msfs2xp-objects.json"), serde_json::to_string_pretty(&r)?)?;
                     }
                     Err(e) => eprintln!("warning: objects for {folder} failed: {e:#}"),

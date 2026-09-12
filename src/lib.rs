@@ -3,6 +3,7 @@
 pub mod bgl;
 pub mod cli;
 pub mod convert;
+pub mod decals;
 pub mod geo;
 pub mod materials;
 pub mod model;
