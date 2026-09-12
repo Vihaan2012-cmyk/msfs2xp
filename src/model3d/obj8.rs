@@ -107,7 +107,9 @@ pub fn write_obj8(model: &Model, meshes: &[usize], opts: &ObjOptions) -> String 
         let want_blend = match m.alpha {
             AlphaMode::Blend => "ATTR_blend".to_string(),
             AlphaMode::Mask => format!("ATTR_no_blend {:.2}", m.alpha_cutoff.clamp(0.0, 1.0)),
-            AlphaMode::Opaque => "ATTR_no_blend 0.50".to_string(),
+            // glTF OPAQUE ignores alpha. MSFS opaque albedo textures often hold
+            // unrelated data in alpha, and a 0.5 cutoff would punch holes in walls.
+            AlphaMode::Opaque => "ATTR_no_blend 0.00".to_string(),
         };
         if blend.as_deref() != Some(want_blend.as_str()) {
             let _ = writeln!(out, "{want_blend}");
