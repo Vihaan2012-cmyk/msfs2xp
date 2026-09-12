@@ -107,6 +107,19 @@ impl MaterialCatalog {
     }
 }
 
+/// The MSFS 2020 install's official package folders (`Official/OneStore`,
+/// `Official/Steam`), where the stock model and material libraries live.
+pub fn stock_official_dirs() -> Vec<PathBuf> {
+    let Some(root) = stock_package_root() else {
+        return Vec::new();
+    };
+    ["OneStore", "Steam"]
+        .iter()
+        .map(|v| root.join("Official").join(v))
+        .filter(|d| d.is_dir())
+        .collect()
+}
+
 fn stock_package_root() -> Option<PathBuf> {
     let local = std::env::var("LOCALAPPDATA").ok()?;
     let roaming = std::env::var("APPDATA").unwrap_or_default();

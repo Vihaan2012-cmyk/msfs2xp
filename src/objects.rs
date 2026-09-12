@@ -30,8 +30,13 @@ pub struct ObjectsReport {
     pub object_files: usize,
     pub textures_written: usize,
     pub triangles: usize,
-    /// Placements whose model is not in the package (stock MSFS library objects).
+    /// Placements whose model was found in neither the package nor a stock
+    /// library on disk (usually MSFS 2024 stock objects, which are streamed).
     pub not_in_package: usize,
+    /// Placements whose model came from an MSFS 2020 stock library.
+    pub stock_placements: usize,
+    /// The most placed of those models: (GUID, placements), most first.
+    pub missing_models: Vec<(String, usize)>,
     pub failed_models: Vec<String>,
     pub missing_textures: Vec<String>,
     pub dsf_tiles: Vec<String>,
@@ -132,10 +137,38 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         return Ok(report);
     }
     let mut catalog = ModelCatalog::default();
+    let mut package_guids: HashSet<Guid> = HashSet::new();
     for path in &loaded.model_libraries {
         match ModelLibrary::open(path) {
-            Ok(lib) => catalog.add(lib),
+            Ok(lib) => {
+                package_guids.extend(lib.guids().iter().copied());
+                catalog.add(lib)
+            }
             Err(e) => report.failed_models.push(format!("{}: {e}", path.display())),
+        }
+    }
+    // Models the package does not carry are stock MSFS library objects. MSFS
+    // 2024 streams its own, but an MSFS 2020 install keeps the shared generic
+    // libraries (hangars, buildings, props) on disk, so use those when present.
+    // They are added after the package's libraries, which therefore win.
+    let mut stock_dirs: Vec<PathBuf> = Vec::new();
+    if loaded.placements.iter().any(|p| !package_guids.contains(&p.guid)) {
+        for official in crate::materials::stock_official_dirs() {
+            let Ok(entries) = std::fs::read_dir(&official) else { continue };
+            for e in entries.filter_map(Result::ok) {
+                if e.file_name().to_string_lossy().to_ascii_lowercase().contains("modellib") {
+                    stock_dirs.push(e.path());
+                }
+            }
+        }
+        for dir in &stock_dirs {
+            for f in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+                if f.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("bgl")) {
+                    if let Ok(lib) = ModelLibrary::open(f.path()) {
+                        catalog.add(lib);
+                    }
+                }
+            }
         }
     }
 
@@ -152,13 +185,22 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         (p.guid, (p.scale * 1000.0).round() as i32, quarters)
     };
     let mut wanted: BTreeMap<VariantKey, f32> = BTreeMap::new();
+    let mut missing: HashMap<Guid, usize> = HashMap::new();
     for p in &loaded.placements {
         if catalog.find(&p.guid).is_some() {
             wanted.entry(key(p)).or_insert(p.scale);
+            if !package_guids.contains(&p.guid) {
+                report.stock_placements += 1;
+            }
         } else {
             report.not_in_package += 1;
+            *missing.entry(p.guid).or_default() += 1;
         }
     }
+    let mut missing: Vec<(String, usize)> = missing.into_iter().map(|(g, n)| (g.to_string(), n)).collect();
+    missing.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    missing.truncate(200);
+    report.missing_models = missing;
 
     let objects_dir = pack_dir.join("objects");
     let textures_dir = objects_dir.join("textures");
@@ -169,7 +211,12 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     }
     remove_dsf_tiles(&pack_dir.join("Earth nav data"))?;
     std::fs::create_dir_all(&textures_dir)?;
-    let textures = texture_index(&loaded.source.root);
+    // Stock textures first, then the package's own, so the package wins.
+    let mut textures: HashMap<String, PathBuf> = HashMap::new();
+    for dir in &stock_dirs {
+        textures.extend(texture_index(dir));
+    }
+    textures.extend(texture_index(&loaded.source.root));
     let written_textures: Mutex<HashMap<String, Option<String>>> = Mutex::new(HashMap::new());
     let missing: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 
