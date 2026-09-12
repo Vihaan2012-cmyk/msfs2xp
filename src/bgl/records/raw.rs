@@ -4,6 +4,8 @@
 //! coordinates are already decoded to degrees/metres because that is lossless).
 //! Interpretation into the sim-neutral model happens in `crate::model`.
 
+use crate::bgl::guid::Guid;
+
 /// Which record layout family a file (or a single record) uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Variant {
@@ -211,11 +213,19 @@ pub struct RawApron {
     pub draw_detail: bool,
     /// `(lat, lon)` boundary vertices.
     pub vertices: Vec<(f64, f64)>,
+    /// MSFS flag byte (bit 2 marks a decal laid over the pavement).
+    pub flags: u8,
+    /// RGBA tint multiplied into the material.
+    pub tint: [u8; 4],
+    pub material: Option<Guid>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RawPaintedLine {
     pub kind: u16,
+    /// How the line follows its points (MSFS "True Angle": none, begin, end, both, all).
+    pub true_angle: u8,
+    pub material: Option<Guid>,
     pub vertices: Vec<(f64, f64)>,
 }
 

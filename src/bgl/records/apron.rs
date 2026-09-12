@@ -9,6 +9,8 @@
 use crate::bgl::file::RecordSlice;
 use crate::bgl::reader::BglError;
 
+use crate::bgl::guid::Guid;
+
 use super::geoscan::{count_matches, find_vertex_run, read_vertices, Near};
 use super::ids::*;
 use super::raw::RawApron;
@@ -18,6 +20,16 @@ pub fn parse_apron(rec: &RecordSlice, near: &Near, warnings: &mut Vec<String>) -
     let mut r = rec.body();
     let surface = r.u8()? & 0x7F;
     let data = rec.data;
+
+    // MSFS layout: a flag byte at 6 (where older formats kept the surface),
+    // an RGBA tint at 8..12 and the material GUID at 12..28.
+    let flags = data.get(6).copied().unwrap_or(0);
+    let tint = data.get(8..12).map(|t| [t[0], t[1], t[2], t[3]]).unwrap_or([0; 4]);
+    let material = if rec.id == AP_APRON_FIRST_MSFS || rec.id == AP_APRON_FIRST_MSFS_NEW {
+        data.get(12..28).and_then(Guid::from_slice).filter(|g| !g.is_nil())
+    } else {
+        None
+    };
 
     let found = find_vertex_run(data, near, 3);
     let (at, count) = match found {
@@ -29,6 +41,9 @@ pub fn parse_apron(rec: &RecordSlice, near: &Near, warnings: &mut Vec<String>) -
                 draw_surface: true,
                 draw_detail: true,
                 vertices: Vec::new(),
+                flags,
+                tint,
+                material,
             });
         }
     };
@@ -45,6 +60,9 @@ pub fn parse_apron(rec: &RecordSlice, near: &Near, warnings: &mut Vec<String>) -
         draw_surface: true,
         draw_detail: true,
         vertices: read_vertices(data, at, count),
+        flags,
+        tint,
+        material,
     })
 }
 
@@ -67,6 +85,7 @@ pub fn parse_apron2(rec: &RecordSlice) -> Result<RawApron, BglError> {
         draw_surface: flags & 1 != 0,
         draw_detail: flags & 2 != 0,
         vertices: read_vertices(rec.data, r.pos(), count),
+        ..Default::default()
     })
 }
 
@@ -91,10 +110,10 @@ mod tests {
         // Mirrors the real MSFS 2020 layout: surface, GUID, assorted fields,
         // vertex count at offset 48, vertices at 52, index data afterwards.
         let body = Bytes::new()
-            .u8(3)
-            .zeros(16) // material GUID
-            .u8(0x42)
-            .u32(0)
+            .u8(3) // flags
+            .u8(0xFF)
+            .raw(&[0x69, 0x6E, 0x72, 0xFF]) // tint
+            .zeros(16) // material GUID: none
             .f32(25.0)
             .f32(0.0)
             .f32(2.0)
@@ -128,6 +147,9 @@ mod tests {
         let a = parse_apron(&rec, &Near::new(LAT, LON), &mut w).unwrap();
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(a.surface, 3);
+        assert_eq!(a.flags, 3);
+        assert_eq!(a.tint, [0x69, 0x6E, 0x72, 0xFF]);
+        assert!(a.material.is_none(), "an all-zero GUID means no material");
         assert_eq!(a.vertices.len(), 4);
         assert!((a.vertices[0].0 - LAT).abs() < 1e-6);
         assert!((a.vertices[2].1 - (LON + 0.001)).abs() < 1e-6);

@@ -19,6 +19,7 @@ use crate::bgl::records::scenery::{self, RawPlacement};
 use crate::bgl::records::{parse_airport, Variant};
 use crate::bgl::{classify, BglFile, FileClass};
 use crate::geo::{inverse, LatLon};
+use crate::materials::{self, MaterialCatalog};
 use crate::model::{self, Airport, SimKind, Windsock};
 
 /// One input unit: a package, or a loose set of BGL files.
@@ -48,6 +49,8 @@ pub struct Loaded {
     pub placements: Vec<RawPlacement>,
     pub model_libraries: Vec<PathBuf>,
     pub problems: Vec<String>,
+    /// Informational messages about how the source was interpreted.
+    pub notes: Vec<String>,
 }
 
 fn is_bgl(p: &Path) -> bool {
@@ -209,6 +212,16 @@ fn section_kinds(path: &Path) -> Result<Vec<u32>, String> {
         .collect())
 }
 
+/// The simulator's stock material libraries, read once per run.
+fn stock_materials() -> &'static MaterialCatalog {
+    static STOCK: std::sync::OnceLock<MaterialCatalog> = std::sync::OnceLock::new();
+    STOCK.get_or_init(|| {
+        let mut c = MaterialCatalog::default();
+        c.load_stock();
+        c
+    })
+}
+
 /// Read every airport and placement in a source.
 pub fn load(source: &Source, hint: Option<Variant>) -> Loaded {
     let mut loaded = Loaded {
@@ -217,6 +230,7 @@ pub fn load(source: &Source, hint: Option<Variant>) -> Loaded {
         placements: Vec::new(),
         model_libraries: Vec::new(),
         problems: Vec::new(),
+        notes: Vec::new(),
     };
     let mut windsocks: Vec<LatLon> = Vec::new();
 
@@ -273,6 +287,20 @@ pub fn load(source: &Source, hint: Option<Variant>) -> Loaded {
     }
 
     loaded.airports = model::merge::merge_by_ident(std::mem::take(&mut loaded.airports));
+
+    // Name every material the package or the simulator's stock libraries know.
+    let mut catalog = stock_materials().clone();
+    catalog.load_package(&source.root);
+    for ap in &mut loaded.airports {
+        let st = materials::resolve_airport(ap, &catalog);
+        let total = st.aprons_named + st.aprons_from_tint + st.aprons_defaulted;
+        if total > 0 {
+            loaded.notes.push(format!(
+                "{}: ground materials named {} of {total}, guessed from tint {}, defaulted {}; {} painted lines named",
+                ap.icao, st.aprons_named, st.aprons_from_tint, st.aprons_defaulted, st.lines_named
+            ));
+        }
+    }
 
     // Windsocks are free-standing scenery objects; attach each to the nearest
     // airport within 5 km.

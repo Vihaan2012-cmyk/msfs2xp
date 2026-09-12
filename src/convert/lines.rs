@@ -7,7 +7,8 @@
 
 use crate::geo::poly::offset_polyline;
 use crate::geo::{LatLon, Plane};
-use crate::model::{Airport, EdgeLine, PaintedLineKind, PathKind};
+use crate::materials::{classify_line_name, LineColour};
+use crate::model::{Airport, EdgeLine, PaintedLine, PaintedLineKind, PathKind};
 use crate::xplane::apt::{AptAirport, LinearFeature, Node};
 
 use super::Report;
@@ -73,7 +74,7 @@ fn feature(name: &str, points: &[LatLon], line: u8, light: u8) -> Option<LinearF
 
 pub fn build(ap: &Airport, plane: &Plane, out: &mut AptAirport, report: &mut Report) {
     for l in &ap.painted_lines {
-        match painted_line_kind(l.kind) {
+        match line_code_for(l) {
             Some(line) => {
                 // Hold-short bars are directional in both simulators: MSFS
                 // encodes the flip in the style, X-Plane in the node order.
@@ -81,7 +82,7 @@ pub fn build(ap: &Airport, plane: &Plane, out: &mut AptAirport, report: &mut Rep
                 if l.kind == PaintedLineKind::HoldShortBackward || l.kind == PaintedLineKind::NonMovementBack {
                     pts.reverse();
                 }
-                if let Some(f) = feature(&format!("{:?}", l.kind), &pts, line, 0) {
+                if let Some(f) = feature(&format!("{:?}", l.kind), &pts, line, light_for(l, line)) {
                     out.lines.push(f);
                     report.converted("painted lines", 1);
                 }
@@ -175,8 +176,40 @@ pub fn build(ap: &Airport, plane: &Plane, out: &mut AptAirport, report: &mut Rep
     }
 }
 
-fn painted_line_kind(k: PaintedLineKind) -> Option<u8> {
-    painted_line_code(k)
+/// The light string that goes with a lighted painted line.
+fn light_for(l: &PaintedLine, line: u8) -> u8 {
+    if !l.lit {
+        return 0;
+    }
+    match line {
+        code::RUNWAY_HOLD | code::OTHER_HOLD => code::LIGHT_HOLD,
+        code::ILS_HOLD => code::LIGHT_ILS_HOLD,
+        code::EDGE | code::WIDE_DOUBLE_BROKEN | code::BOUNDARY => code::LIGHT_EDGE,
+        _ => code::LIGHT_CENTRE,
+    }
+}
+
+/// The line code for a painted line: its material name when the library
+/// knows it (iniBuilds names say colour and dash pattern outright), otherwise
+/// its MSFS line type.
+fn line_code_for(l: &PaintedLine) -> Option<u8> {
+    if let Some(name) = &l.material_name {
+        let look = classify_line_name(name);
+        if look.skip {
+            return None;
+        }
+        if look.hold_short {
+            return Some(code::RUNWAY_HOLD);
+        }
+        match (look.colour, look.dashed) {
+            (LineColour::Yellow, false) => return Some(code::CENTRE),
+            (LineColour::Yellow, true) => return Some(code::BOUNDARY),
+            (LineColour::White, false) => return Some(code::WHITE_SOLID),
+            (LineColour::White, true) => return Some(code::WHITE_BROKEN),
+            (LineColour::Unknown, _) => {}
+        }
+    }
+    painted_line_code(l.kind)
 }
 
 #[cfg(test)]
@@ -213,10 +246,12 @@ mod tests {
                 PaintedLine {
                     kind: PaintedLineKind::Default,
                     vertices: vec![LatLon::new(25.0, 55.0), LatLon::new(25.001, 55.0)],
+                    ..Default::default()
                 },
                 PaintedLine {
                     kind: PaintedLineKind::EdgeSolid,
                     vertices: loop_pts,
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -230,6 +265,54 @@ mod tests {
     }
 
     #[test]
+    fn material_names_override_the_line_type() {
+        let pts = vec![LatLon::new(25.0, 55.0), LatLon::new(25.001, 55.0)];
+        let line = |name: &str| PaintedLine {
+            kind: PaintedLineKind::Default,
+            vertices: pts.clone(),
+            material_name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let ap = Airport {
+            datum: LatLon::new(25.0, 55.0),
+            painted_lines: vec![
+                line("INI_Lines_Dashed_White"),
+                line("INI_CenterLine_Black"),
+                line("INI_Yellow_Lines"),
+            ],
+            ..Default::default()
+        };
+        let out = run(&ap);
+        assert_eq!(out.lines.len(), 2, "the black outline is dropped");
+        assert_eq!(out.lines[0].nodes[0].line, 22);
+        assert_eq!(out.lines[1].nodes[0].line, 1);
+    }
+
+    #[test]
+    fn lighted_lines_get_matching_light_strings() {
+        let pts = vec![LatLon::new(25.0, 55.0), LatLon::new(25.001, 55.0)];
+        let line = |kind, lit| PaintedLine {
+            kind,
+            lit,
+            vertices: pts.clone(),
+            ..Default::default()
+        };
+        let ap = Airport {
+            datum: LatLon::new(25.0, 55.0),
+            painted_lines: vec![
+                line(PaintedLineKind::HoldShortForward, true),
+                line(PaintedLineKind::Default, true),
+                line(PaintedLineKind::EdgeSolid, false),
+            ],
+            ..Default::default()
+        };
+        let out = run(&ap);
+        assert_eq!(out.lines[0].nodes[0].light, 103);
+        assert_eq!(out.lines[1].nodes[0].light, 101);
+        assert_eq!(out.lines[2].nodes[0].light, 0);
+    }
+
+    #[test]
     fn backward_hold_short_is_reversed() {
         let pts = vec![LatLon::new(25.0, 55.0), LatLon::new(25.0, 55.001)];
         let ap = Airport {
@@ -237,6 +320,7 @@ mod tests {
             painted_lines: vec![PaintedLine {
                 kind: PaintedLineKind::HoldShortBackward,
                 vertices: pts,
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -278,6 +362,7 @@ mod tests {
         ap.painted_lines.push(PaintedLine {
             kind: PaintedLineKind::Default,
             vertices: vec![LatLon::new(25.0, 55.0), LatLon::new(25.001, 55.0)],
+            ..Default::default()
         });
         assert_eq!(run(&ap).lines.len(), 1);
     }

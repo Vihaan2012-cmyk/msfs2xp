@@ -62,7 +62,7 @@ pub fn build(ap: &Airport, plane: &Plane, opts: &Options, out: &mut AptAirport, 
     for a in &ap.aprons {
         let code = surface_code(&a.surface);
         if !a.draw || code == surface::TRANSPARENT || code == surface::WATER {
-            report.dropped("invisible or water aprons", 1);
+            report.dropped("decals, invisible and water aprons", 1);
             continue;
         }
         let ring = poly::dedup(&a.vertices.iter().map(|v| plane.to_xy(*v)).collect::<Vec<_>>());
@@ -172,6 +172,7 @@ mod tests {
                 LatLon::new(lat + d, lon + d),
                 LatLon::new(lat, lon + d),
             ],
+            ..Default::default()
         }
     }
 
@@ -234,6 +235,7 @@ mod tests {
             surface: Surface::Asphalt,
             draw: true,
             vertices: vec![LatLon::new(25.25, 55.36), LatLon::new(25.2501, 55.36)],
+            ..Default::default()
         };
         let ap = Airport {
             datum: LatLon::new(25.25, 55.36),

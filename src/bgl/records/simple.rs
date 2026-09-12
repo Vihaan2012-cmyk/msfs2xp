@@ -5,7 +5,7 @@ use crate::bgl::file::RecordSlice;
 use crate::bgl::reader::BglError;
 
 use super::raw::{RawCom, RawHelipad, RawJetway, RawStart};
-use super::scenery::parse_library_object;
+use super::scenery::{parse_library_object, parse_sim_object};
 
 /// Airport / navaid name record: the rest of the record is the string.
 pub fn parse_name(rec: &RecordSlice) -> Result<String, BglError> {
@@ -95,7 +95,11 @@ pub fn parse_jetway(rec: &RecordSlice) -> Result<RawJetway, BglError> {
     // nearby in case a later build moves it.
     let placement = std::iter::once(0x12usize)
         .chain((0x0Ausize..0x30).step_by(2))
-        .find_map(|at| rec.data.get(at..).and_then(parse_library_object));
+        .find_map(|at| {
+            rec.data
+                .get(at..)
+                .and_then(|r| parse_library_object(r).or_else(|| parse_sim_object(r)))
+        });
     Ok(RawJetway {
         parking_number,
         parking_name,
@@ -218,6 +222,35 @@ mod tests {
         assert!((p.lat - 25.2486).abs() < 1e-6);
         assert!((p.heading - 90.0).abs() < 0.01);
         assert_eq!(p.guid.0, guid);
+    }
+
+    #[test]
+    fn parses_a_jetway_placed_as_a_sim_object() {
+        // KORD layout: number, name code, two zero words, u32 length, then a
+        // 0x001D SimObject record with the same head as a library object.
+        let sim = Bytes::new()
+            .u16(0x001D)
+            .u16(72)
+            .pos2(41.9739, -87.8867)
+            .i32(0)
+            .u16(1)
+            .u16(0)
+            .u16(0xFFFF)
+            .u16(0xAC81)
+            .zeros(72 - 24)
+            .done();
+        let body = Bytes::new().u16(24).u16(0x18).u16(0).u16(0).u32(72).raw(&sim).done();
+        let bytes = record(AP_MSFS_JETWAY, &body);
+        let rec = RecordSlice {
+            id: AP_MSFS_JETWAY,
+            offset: 0,
+            data: &bytes,
+        };
+        let j = parse_jetway(&rec).unwrap();
+        assert_eq!((j.parking_number, j.parking_name), (24, 0x18));
+        let p = j.placement.expect("SimObject placement");
+        assert!((p.lon + 87.8867).abs() < 1e-6);
+        assert!((p.heading - 242.58).abs() < 0.01);
     }
 
     #[test]

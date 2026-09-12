@@ -213,7 +213,12 @@ fn helipad_kind_from_code(code: u8) -> HelipadKind {
     }
 }
 
-/// Painted line styles, in the order the MSFS scenery editor lists them.
+/// Painted line styles, indexed in the order the MSFS scenery editor lists them.
+///
+/// The record stores `(index << 1) | lighted`: odd values only ever occur for
+/// the first five styles, which are exactly the markings that carry lights in
+/// reality (centrelines, hold-short bars and taxiway edges). Read plainly, the
+/// byte would leave O'Hare with almost no runway hold-short lines.
 fn painted_line_kind_from_code(code: u16) -> PaintedLineKind {
     match code {
         0 => PaintedLineKind::Default,
@@ -235,6 +240,8 @@ fn painted_line_kind_from_code(code: u16) -> PaintedLineKind {
         16 => PaintedLineKind::EdgeSolidOrtho,
         17 => PaintedLineKind::WideRed,
         18 => PaintedLineKind::SlimRed,
+        19 => PaintedLineKind::HoldShortForward,
+        20 => PaintedLineKind::HoldShortBackward,
         other => PaintedLineKind::Other(other),
     }
 }
@@ -326,7 +333,7 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
         })
         .collect();
 
-    let helipads = raw
+    let mut helipads: Vec<Helipad> = raw
         .helipads
         .iter()
         .map(|h| Helipad {
@@ -353,6 +360,24 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
             is_helipad: s.kind == 3,
         })
         .collect();
+
+    // Some heliports define a helipad start position but no pad. X-Plane needs
+    // a pad to put a helicopter there, so a standard 20 m pad is synthesised.
+    if helipads.is_empty() {
+        for st in raw.starts.iter().filter(|st| st.kind == 3) {
+            helipads.push(Helipad {
+                pos: LatLon::new(st.lat, st.lon),
+                elevation_m: st.alt_m,
+                heading: st.heading,
+                length_m: 20.0,
+                width_m: 20.0,
+                surface: Surface::Concrete,
+                kind: HelipadKind::H,
+                closed: false,
+                transparent: false,
+            });
+        }
+    }
 
     let coms = raw
         .coms
@@ -445,9 +470,20 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
         .aprons
         .iter()
         .map(|a| Apron {
-            surface: surface_from_code(a.surface),
-            draw: a.draw_surface,
+            // With a material GUID the byte at offset 6 is flags, not a surface;
+            // the surface then comes from the material library.
+            surface: if a.material.is_some() {
+                Surface::Unknown
+            } else {
+                surface_from_code(a.surface)
+            },
+            // Bit 2 marks a decal laid over the pavement: stand numbers, arrows,
+            // tyre marks. X-Plane pavement cannot layer those, so they are not drawn.
+            draw: a.draw_surface && !(a.material.is_some() && a.flags & 0x04 != 0),
             vertices: a.vertices.iter().map(|&(lat, lon)| LatLon::new(lat, lon)).collect(),
+            material_guid: a.material,
+            material_name: None,
+            tint: a.tint,
         })
         .collect();
 
@@ -455,8 +491,11 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
         .painted_lines
         .iter()
         .map(|l| PaintedLine {
-            kind: painted_line_kind_from_code(l.kind),
+            kind: painted_line_kind_from_code(l.kind >> 1),
+            lit: l.kind & 1 == 1,
             vertices: l.vertices.iter().map(|&(lat, lon)| LatLon::new(lat, lon)).collect(),
+            material_guid: l.material,
+            material_name: None,
         })
         .collect();
 
@@ -687,6 +726,49 @@ mod tests {
             ..Default::default()
         };
         assert!(airport_from_raw(raw, "f.bgl", "pkg").tower.is_none());
+    }
+
+    #[test]
+    fn a_helipad_start_without_a_pad_gets_one() {
+        let raw = RawAirport {
+            variant: Variant::Msfs2024,
+            starts: vec![crate::bgl::records::raw::RawStart {
+                kind: 3,
+                lat: 25.1413,
+                lon: 55.1852,
+                heading: 45.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let ap = airport_from_raw(raw, "f.bgl", "pkg");
+        assert_eq!(ap.helipads.len(), 1);
+        assert_eq!(ap.helipads[0].heading, 45.0);
+    }
+
+    #[test]
+    fn painted_line_type_byte_carries_a_lighted_bit() {
+        let raw = RawAirport {
+            variant: Variant::Msfs2024,
+            painted_lines: vec![
+                crate::bgl::records::raw::RawPaintedLine {
+                    kind: 5,
+                    vertices: vec![(25.0, 55.0), (25.001, 55.0)],
+                    ..Default::default()
+                },
+                crate::bgl::records::raw::RawPaintedLine {
+                    kind: 36,
+                    vertices: vec![(25.0, 55.0), (25.001, 55.0)],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let ap = airport_from_raw(raw, "f.bgl", "pkg");
+        assert_eq!(ap.painted_lines[0].kind, PaintedLineKind::HoldShortBackward);
+        assert!(ap.painted_lines[0].lit);
+        assert_eq!(ap.painted_lines[1].kind, PaintedLineKind::SlimRed);
+        assert!(!ap.painted_lines[1].lit);
     }
 
     #[test]

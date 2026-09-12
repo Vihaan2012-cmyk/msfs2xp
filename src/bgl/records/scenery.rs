@@ -119,6 +119,34 @@ pub fn parse_library_object(rec: &[u8]) -> Option<RawPlacement> {
     })
 }
 
+/// Record id of a SimObject placement, which names its object by title.
+pub const SO_SIM_OBJECT: u16 = 0x001D;
+
+/// Parse a SimObject placement (0x001D).
+///
+/// It shares the library object's head (position, altitude, flags, angles)
+/// but names a SimObject by title instead of a model by GUID, so the GUID is
+/// left nil. MSFS 2024 jetways at some airports are placed this way.
+pub fn parse_sim_object(rec: &[u8]) -> Option<RawPlacement> {
+    if rec.len() < 0x18 || u16_at(rec, 0) != SO_SIM_OBJECT {
+        return None;
+    }
+    if (u16_at(rec, 2) as usize) < 0x18 {
+        return None;
+    }
+    Some(RawPlacement {
+        lat: lat_from_u32(u32_at(rec, 0x08)),
+        lon: lon_from_u32(u32_at(rec, 0x04)),
+        alt_m: alt_from_i32(u32_at(rec, 0x0C) as i32),
+        agl: u16_at(rec, 0x10) & 0x0001 != 0,
+        pitch: signed(angle_u16(u16_at(rec, 0x12))),
+        bank: signed(angle_u16(u16_at(rec, 0x14))),
+        heading: angle_u16(u16_at(rec, 0x16)),
+        scale: 1.0,
+        guid: Guid::NIL,
+    })
+}
+
 /// Everything found in a file's scenery-object sections.
 #[derive(Debug, Default)]
 pub struct PlacementScan {
@@ -240,6 +268,18 @@ mod tests {
         rec[0x2C..0x34].copy_from_slice(&(-12.0f64).to_le_bytes());
         let p = parse_library_object(&rec).unwrap();
         assert!((p.lat - 25.2354).abs() < 1e-6, "coarse position kept");
+    }
+
+    #[test]
+    fn reads_a_sim_object_placement() {
+        let mut rec = head(72, 41.9739, -87.8867, 0xAC81).done();
+        rec[0] = 0x1D;
+        rec.extend_from_slice(&[0u8; 72 - 44]);
+        let p = parse_sim_object(&rec).unwrap();
+        assert!((p.lat - 41.9739).abs() < 1e-6);
+        assert!((p.heading - 242.58).abs() < 0.01, "{}", p.heading);
+        assert!(p.guid.is_nil());
+        assert!(parse_library_object(&rec).is_none());
     }
 
     #[test]

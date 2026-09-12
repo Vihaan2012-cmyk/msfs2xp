@@ -277,6 +277,7 @@ mod tests {
                 LatLon::new(25.251, 55.361),
                 LatLon::new(25.250, 55.361),
             ],
+            ..Default::default()
         });
         let (out, _) = convert(&ap, &Options::default());
         let text = crate::xplane::write(&crate::xplane::Apt { airports: vec![out] });

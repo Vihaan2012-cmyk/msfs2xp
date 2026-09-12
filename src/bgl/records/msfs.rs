@@ -9,6 +9,8 @@
 use crate::bgl::file::RecordSlice;
 use crate::bgl::reader::BglError;
 
+use crate::bgl::guid::Guid;
+
 use super::geoscan::{find_vertex_run, read_pair, read_vertices, Near};
 use super::raw::{RawPaintedLine, RawSign};
 
@@ -19,6 +21,23 @@ pub fn parse_painted_line(
     warnings: &mut Vec<String>,
 ) -> Result<RawPaintedLine, BglError> {
     let data = rec.data;
+    // Every MSFS 2020 and 2024 sample so far: line type u8 at 6, "true angle"
+    // u8 at 7, vertex count u16 at 8, material GUID at 12..28, vertices from 28.
+    if data.len() >= 28 {
+        let count = u16::from_le_bytes([data[8], data[9]]) as usize;
+        if count >= 2 && 28 + count * 8 == data.len() {
+            let vertices = read_vertices(data, 28, count);
+            if vertices.iter().all(|&(lat, lon)| near.accepts(lat, lon)) {
+                return Ok(RawPaintedLine {
+                    kind: data[6] as u16,
+                    true_angle: data[7],
+                    material: Guid::from_slice(&data[12..28]).filter(|g| !g.is_nil()),
+                    vertices,
+                });
+            }
+        }
+    }
+    // Otherwise locate the vertices structurally; the style is then unknown.
     let (start, count) = match find_vertex_run(data, near, 2) {
         Some(v) => v,
         None => {
@@ -26,16 +45,10 @@ pub fn parse_painted_line(
             return Ok(RawPaintedLine::default());
         }
     };
-    // The line style sits in the head. The `u16` two bytes before the vertex
-    // count is the style code in every sample examined; fall back to the first
-    // field of the record body when the run starts too early for that.
-    let kind = if start >= 4 {
-        u16::from_le_bytes([data[start - 4], data[start - 3]])
-    } else {
-        u16::from_le_bytes([data[6], data[7]])
-    };
     Ok(RawPaintedLine {
-        kind,
+        kind: 0,
+        true_angle: 0,
+        material: None,
         vertices: read_vertices(data, start, count),
     })
 }
@@ -137,11 +150,16 @@ mod tests {
     const LON: f64 = 55.3644;
 
     #[test]
-    fn finds_painted_line_vertices() {
+    fn reads_the_structured_painted_line_layout() {
+        let guid = [
+            0xD6u8, 0xE1, 0x30, 0x82, 0x0C, 0x68, 0xB9, 0x4E, 0xA9, 0xFD, 0x01, 0xF9, 0xA3, 0xEF, 0xE3, 0x18,
+        ];
         let body = Bytes::new()
-            .u16(6)
-            .u16(4) // style code, two bytes before the count
-            .u16(3) // vertex count
+            .u8(7)
+            .u8(3)
+            .u16(3)
+            .u16(0)
+            .raw(&guid)
             .pos2(LAT, LON)
             .pos2(LAT + 0.001, LON)
             .pos2(LAT + 0.002, LON + 0.001)
@@ -155,10 +173,32 @@ mod tests {
         let mut w = Vec::new();
         let line = parse_painted_line(&rec, &Near::new(LAT, LON), &mut w).unwrap();
         assert!(w.is_empty(), "{w:?}");
-        assert_eq!(line.kind, 4);
+        assert_eq!((line.kind, line.true_angle), (7, 3));
+        assert_eq!(line.material, Some(Guid(guid)));
         assert_eq!(line.vertices.len(), 3);
-        assert!((line.vertices[0].0 - LAT).abs() < 1e-6);
         assert!((line.vertices[2].1 - (LON + 0.001)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn falls_back_to_scanning_when_the_layout_differs() {
+        let body = Bytes::new()
+            .u16(6)
+            .u16(4)
+            .u16(3)
+            .pos2(LAT, LON)
+            .pos2(LAT + 0.001, LON)
+            .pos2(LAT + 0.002, LON + 0.001)
+            .done();
+        let bytes = record(AP_MSFS_PAINTED_LINE, &body);
+        let rec = RecordSlice {
+            id: AP_MSFS_PAINTED_LINE,
+            offset: 0,
+            data: &bytes,
+        };
+        let mut w = Vec::new();
+        let line = parse_painted_line(&rec, &Near::new(LAT, LON), &mut w).unwrap();
+        assert_eq!(line.vertices.len(), 3);
+        assert!(line.material.is_none());
     }
 
     #[test]

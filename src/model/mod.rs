@@ -425,6 +425,12 @@ pub struct Apron {
     pub surface: Surface,
     pub draw: bool,
     pub vertices: Vec<LatLon>,
+    /// The MSFS material, when the record names one.
+    pub material_guid: Option<crate::bgl::guid::Guid>,
+    /// The material's library name, once resolved.
+    pub material_name: Option<String>,
+    /// RGBA tint MSFS multiplies into the material.
+    pub tint: [u8; 4],
 }
 
 /// Painted ground marking style, as named in the MSFS scenery editor.
@@ -455,7 +461,11 @@ pub enum PaintedLineKind {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PaintedLine {
     pub kind: PaintedLineKind,
+    /// The lighted variant of the style (centreline, hold-short or edge lights).
+    pub lit: bool,
     pub vertices: Vec<LatLon>,
+    pub material_guid: Option<crate::bgl::guid::Guid>,
+    pub material_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

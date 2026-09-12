@@ -53,6 +53,14 @@ fn convert_loaded(loaded: &Loaded, filter: &[String], opts: &Options) -> Vec<(Ap
         .airports
         .iter()
         .filter(|a| wanted(&a.icao, filter))
+        .filter(|a| {
+            // X-Plane rejects an airport with no runway, water runway or helipad.
+            let usable = !a.runways.is_empty() || !a.helipads.is_empty();
+            if !usable {
+                eprintln!("note: {} ({}) has no runway or helipad; skipped", a.icao, a.name);
+            }
+            usable
+        })
         .filter_map(|ap| {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| convert::convert(ap, opts)));
             match result {
@@ -215,6 +223,9 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
         for (loaded, pairs) in results {
             for p in &loaded.problems {
                 eprintln!("note: {}: {p}", loaded.source.name);
+            }
+            for n in &loaded.notes {
+                eprintln!("note: {n}");
             }
             if pairs.is_empty() {
                 eprintln!("note: {} contains no convertible airport", loaded.source.name);

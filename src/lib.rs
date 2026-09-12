@@ -4,9 +4,12 @@ pub mod bgl;
 pub mod cli;
 pub mod convert;
 pub mod geo;
+pub mod materials;
 pub mod model;
+pub mod model3d;
 pub mod package;
 pub mod pipeline;
+pub mod texture;
 pub mod xplane;
 
 use anyhow::Context;
