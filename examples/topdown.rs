@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
         let Ok(lib) = ModelLibrary::open(e.path()) else { continue };
         for g in lib.guids() {
             let Ok(info) = lib.info(g) else { continue };
-            for (name, lod) in jobs.iter().filter(|(n, _)| info.name.eq_ignore_ascii_case(n)) {
+            for (_name, lod) in jobs.iter().filter(|(n, _)| info.name.eq_ignore_ascii_case(n)) {
                 let lod = (*lod).min(info.lods.len() - 1);
                 let m = load_glb(&lib.load_lod(g, lod)?)?;
                 let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
