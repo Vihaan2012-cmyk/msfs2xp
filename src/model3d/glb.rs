@@ -627,6 +627,25 @@ pub fn load_glb(bytes: &[u8]) -> Result<Model, ModelError> {
                 },
                 None => (0..positions.len() as u32).collect(),
             };
+            // MSFS packs many primitives into one vertex pool and one index
+            // list; each primitive's share is given only in
+            // extras.ASOBO_primitive. Without it every primitive would read the
+            // whole list and join vertices of unrelated parts.
+            if let Some(ap) = prim["extras"]["ASOBO_primitive"].as_object() {
+                let start = ap.get("StartIndex").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let base = ap.get("BaseVertexIndex").and_then(Value::as_u64).unwrap_or(0) as u32;
+                let end = match ap.get("PrimitiveCount").and_then(Value::as_u64) {
+                    Some(n) => start.saturating_add(n as usize * 3),
+                    None => indices.len(),
+                };
+                if start > end || end > indices.len() {
+                    model
+                        .warnings
+                        .push(format!("{mesh_name}: primitive range outside its index list; skipped"));
+                    continue;
+                }
+                indices = indices[start..end].iter().map(|&i| i.saturating_add(base)).collect();
+            }
             indices.truncate(indices.len() / 3 * 3);
             if indices.iter().any(|&i| i as usize >= positions.len()) {
                 model
@@ -634,15 +653,27 @@ pub fn load_glb(bytes: &[u8]) -> Result<Model, ModelError> {
                     .push(format!("{mesh_name}: index out of range; primitive skipped"));
                 continue;
             }
+            // Keep only the vertices this primitive uses, renumbered in order
+            // of first use.
+            let mut remap = vec![u32::MAX; positions.len()];
+            let mut used: Vec<usize> = Vec::new();
+            for i in indices.iter_mut() {
+                let old = *i as usize;
+                if remap[old] == u32::MAX {
+                    remap[old] = used.len() as u32;
+                    used.push(old);
+                }
+                *i = remap[old];
+            }
             // A mirroring transform flips which side faces front.
             if det < 0.0 {
                 for t in indices.chunks_exact_mut(3) {
                     t.swap(1, 2);
                 }
             }
-            let mut vertices: Vec<Vertex> = positions
+            let mut vertices: Vec<Vertex> = used
                 .iter()
-                .enumerate()
+                .map(|&i| (i, &positions[i]))
                 .map(|(i, p)| Vertex {
                     pos: transform_point(&world, *p),
                     normal: normals
@@ -741,6 +772,66 @@ pub(crate) mod tests {
         out.extend_from_slice(b"BIN\0");
         out.extend_from_slice(&bin);
         out
+    }
+
+    /// Wrap a JSON document and binary chunk into a GLB file.
+    fn pack_glb(json: String, bin: Vec<u8>) -> Vec<u8> {
+        let mut jbytes = json.into_bytes();
+        while jbytes.len() % 4 != 0 {
+            jbytes.push(b' ');
+        }
+        let mut out = b"glTF".to_vec();
+        out.extend_from_slice(&2u32.to_le_bytes());
+        let total = 12 + 8 + jbytes.len() + 8 + bin.len();
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(jbytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&jbytes);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    #[test]
+    fn asobo_primitives_take_their_own_slice_of_shared_buffers() {
+        // Two triangles in one vertex pool and one index list, as MSFS packs
+        // them: the second primitive starts at index 3 with base vertex 3.
+        let mut bin = Vec::new();
+        let verts = [
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [100.0, 0.0, 0.0],
+            [101.0, 0.0, 0.0],
+            [100.0, 0.0, -1.0],
+        ];
+        for v in verts {
+            for c in v {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        let io = bin.len();
+        for i in [0u16, 1, 2, 0, 1, 2] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+            "meshes":[{{"primitives":[
+              {{"attributes":{{"POSITION":0}},"indices":1,"extras":{{"ASOBO_primitive":{{"PrimitiveCount":1,"VertexCount":3}}}}}},
+              {{"attributes":{{"POSITION":0}},"indices":1,"extras":{{"ASOBO_primitive":{{"BaseVertexIndex":3,"StartIndex":3,"PrimitiveCount":1,"VertexCount":3}}}}}}]}}],
+            "buffers":[{{"byteLength":{bl}}}],
+            "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":{io}}},{{"buffer":0,"byteOffset":{io},"byteLength":12}}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":6,"type":"VEC3"}},{{"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}}]}}"#,
+            bl = bin.len(),
+            io = io
+        );
+        let m = load_glb(&pack_glb(json, bin)).unwrap();
+        assert_eq!(m.meshes.len(), 2);
+        assert_eq!(m.triangle_count(), 2, "each primitive reads only its own triangle");
+        assert_eq!(m.meshes[0].vertices.len(), 3, "only the vertices a primitive uses are kept");
+        assert_eq!(m.meshes[1].indices, vec![0, 1, 2]);
+        assert_eq!(m.meshes[1].vertices[0].pos, [100.0, 0.0, 0.0], "base vertex is applied");
     }
 
     #[test]
