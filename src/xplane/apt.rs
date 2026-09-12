@@ -321,6 +321,9 @@ pub struct AptAirport {
     pub water_runways: Vec<WaterRunway>,
     pub helipads: Vec<Helipad>,
     pub pavements: Vec<Pavement>,
+    /// Airport boundary ring (row 130), empty for none. X-Plane flattens the
+    /// terrain inside it when the `flatten` metadata key is 1.
+    pub boundary: Vec<Node>,
     pub lines: Vec<LinearFeature>,
     pub tower: Option<Tower>,
     pub beacons: Vec<Beacon>,

@@ -81,6 +81,48 @@ fn looks_like_icao(s: &str) -> bool {
 }
 
 /// Convert one airport.
+/// Convex hull of `pts` (plane metres), pushed out by `margin` metres from
+/// its centre, counter-clockwise. Fewer than three distinct points give none.
+fn boundary_ring(pts: &[(f64, f64)], margin: f64) -> Vec<(f64, f64)> {
+    let mut p: Vec<(f64, f64)> = pts.iter().copied().filter(|(x, y)| x.is_finite() && y.is_finite()).collect();
+    p.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    p.dedup();
+    if p.len() < 3 {
+        return Vec::new();
+    }
+    let cross = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
+    let mut lower: Vec<(f64, f64)> = Vec::new();
+    for &q in &p {
+        while lower.len() >= 2 && cross(lower[lower.len() - 2], lower[lower.len() - 1], q) <= 0.0 {
+            lower.pop();
+        }
+        lower.push(q);
+    }
+    let mut upper: Vec<(f64, f64)> = Vec::new();
+    for &q in p.iter().rev() {
+        while upper.len() >= 2 && cross(upper[upper.len() - 2], upper[upper.len() - 1], q) <= 0.0 {
+            upper.pop();
+        }
+        upper.push(q);
+    }
+    lower.pop();
+    upper.pop();
+    lower.extend(upper);
+    if lower.len() < 3 {
+        return Vec::new();
+    }
+    let n = lower.len() as f64;
+    let c = (lower.iter().map(|q| q.0).sum::<f64>() / n, lower.iter().map(|q| q.1).sum::<f64>() / n);
+    lower
+        .into_iter()
+        .map(|q| {
+            let (dx, dy) = (q.0 - c.0, q.1 - c.1);
+            let d = dx.hypot(dy).max(1e-9);
+            (q.0 + dx / d * margin, q.1 + dy / d * margin)
+        })
+        .collect()
+}
+
 pub fn convert(ap: &Airport, opts: &Options) -> (AptAirport, Report) {
     let mut report = Report {
         icao: ap.icao.clone(),
@@ -129,6 +171,36 @@ pub fn convert(ap: &Airport, opts: &Options) -> (AptAirport, Report) {
 
     runways::build(ap, &mut out, &mut report);
     pavement::build(ap, &plane, opts, &mut out, &mut report);
+
+    // An airport boundary around everything drawn, with flattening on, so
+    // X-Plane levels its terrain to the field elevation the way MSFS does.
+    // Without it pavement, buildings and vehicles each follow uneven ground.
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    for p in &out.pavements {
+        for n in p.rings.iter().take(1).flatten() {
+            pts.push(plane.to_xy(crate::geo::LatLon::new(n.lat, n.lon)));
+        }
+    }
+    for r in &out.runways {
+        for e in &r.ends {
+            pts.push(plane.to_xy(crate::geo::LatLon::new(e.lat, e.lon)));
+        }
+    }
+    for h in &out.helipads {
+        pts.push(plane.to_xy(crate::geo::LatLon::new(h.lat, h.lon)));
+    }
+    let ring = boundary_ring(&pts, 60.0);
+    if ring.len() >= 3 {
+        out.boundary = ring
+            .iter()
+            .map(|&(x, y)| {
+                let p = plane.to_latlon(x, y);
+                apt::Node::at(p.lat, p.lon)
+            })
+            .collect();
+        out.metadata.push(("flatten".into(), "1".into()));
+        report.converted("airport boundary", 1);
+    }
     if opts.lines {
         lines::build(ap, &plane, &mut out, &mut report);
     }
@@ -202,6 +274,15 @@ pub fn convert(ap: &Airport, opts: &Options) -> (AptAirport, Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boundary_is_a_padded_convex_hull() {
+        let pts = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0), (50.0, 50.0), (50.0, 50.0)];
+        let r = boundary_ring(&pts, 10.0);
+        assert_eq!(r.len(), 4, "interior points are dropped");
+        assert!(crate::geo::poly::signed_area(&r) > 100.0 * 100.0, "padded outward, counter-clockwise");
+        assert!(boundary_ring(&[(0.0, 0.0), (1.0, 1.0)], 10.0).is_empty());
+    }
     use crate::geo::LatLon;
     use crate::model::*;
 

@@ -141,6 +141,10 @@ fn write_airport(out: &mut String, ap: &AptAirport) {
         );
     }
 
+    if ap.boundary.len() >= 3 {
+        let _ = write!(out, "{} Airport Boundary{EOL}", row::BOUNDARY);
+        write_ring(out, &ap.boundary, true);
+    }
     for p in &ap.pavements {
         let rings: Vec<&Vec<Node>> = p.rings.iter().filter(|r| r.len() >= 3).collect();
         if rings.is_empty() {

@@ -176,12 +176,28 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     // does not multiply the object count. DSF objects always sit on the
     // terrain, so MSFS heights above ground are baked into the object, in
     // quarter-metre steps; anything lower than that stays on the ground.
+    // Heights MSFS gives relative to sea level become heights above the field
+    // elevation of an airport within 10 km, whose terrain X-Plane flattens to
+    // that elevation. Elsewhere they cannot be placed and stay on the ground.
+    let airports: Vec<(crate::geo::LatLon, f64)> =
+        loaded.airports.iter().map(|a| (a.datum, a.elevation_m)).collect();
+    let height_of = |p: &RawPlacement| -> f64 {
+        if !p.alt_m.is_finite() {
+            return 0.0;
+        }
+        if p.agl {
+            return p.alt_m;
+        }
+        let here = crate::geo::LatLon::new(p.lat, p.lon);
+        airports
+            .iter()
+            .find(|(datum, _)| crate::geo::inverse(*datum, here).0 < 10_000.0)
+            .map(|(_, elevation)| p.alt_m - elevation)
+            .unwrap_or(0.0)
+    };
     let key = |p: &RawPlacement| -> VariantKey {
-        let quarters = if p.agl && p.alt_m.is_finite() && p.alt_m.abs() >= 0.25 {
-            (p.alt_m * 4.0).round() as i32
-        } else {
-            0
-        };
+        let h = height_of(p);
+        let quarters = if h.abs() >= 0.25 { (h * 4.0).round() as i32 } else { 0 };
         (p.guid, (p.scale * 1000.0).round() as i32, quarters)
     };
     let mut wanted: BTreeMap<VariantKey, f32> = BTreeMap::new();
