@@ -70,7 +70,7 @@ fn quantise(v: f64, offset: f64, scale: f64) -> u16 {
     if scale <= 0.0 {
         return 0;
     }
-    ((v - offset) / scale).round().clamp(0.0, 65_535.0) as u16
+    ((v - offset) / scale * 65_535.0).round().clamp(0.0, 65_535.0) as u16
 }
 
 /// A plane's (scale, offset) covering `[min, max]`.
@@ -86,9 +86,12 @@ fn plane_range(min: f64, max: f64) -> (f64, f64) {
     if (offset as f64) > min {
         offset = offset.next_down();
     }
+    // X-Plane decodes a point as raw / 65535 * scale + offset, so the scale
+    // is the plane's full span (confirmed against Laminar's own DSFs, whose
+    // heading plane has scale 360).
     let span = (max - offset as f64).max(1e-9);
-    let mut scale = (span / 65_535.0) as f32;
-    if (scale as f64) * 65_535.0 + (offset as f64) < max {
+    let mut scale = span as f32;
+    if (scale as f64) + (offset as f64) < max {
         scale = scale.next_up();
     }
     (scale as f64, offset as f64)
@@ -146,7 +149,7 @@ pub fn build_tile(south: i32, west: i32, objects: &[String], placements: &[Place
             lon0 = lon0.min(p.lon);
             lon1 = lon1.max(p.lon);
         }
-        let planes = [plane_range(lon0, lon1), plane_range(lat0, lat1), (360.0 / 65_535.0, 0.0)];
+        let planes = [plane_range(lon0, lon1), plane_range(lat0, lat1), (360.0, 0.0)];
         let mut data = Vec::with_capacity(5 + pool.len() * 6 + 3);
         data.extend_from_slice(&(pool.len() as u32).to_le_bytes());
         data.push(3); // planes
@@ -292,9 +295,9 @@ pub(crate) mod tests {
                     (0..*n)
                         .map(|i| {
                             [
-                                vals[0][i] as f64 * f(0) + f(1),
-                                vals[1][i] as f64 * f(2) + f(3),
-                                vals[2][i] as f64 * f(4) + f(5),
+                                vals[0][i] as f64 / 65_535.0 * f(0) + f(1),
+                                vals[1][i] as f64 / 65_535.0 * f(2) + f(3),
+                                vals[2][i] as f64 / 65_535.0 * f(4) + f(5),
                             ]
                         })
                         .collect(),
