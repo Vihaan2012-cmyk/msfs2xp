@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     }
     println!("{models} models, {failed} failed to load");
     for (k, v) in &kinds { println!("  {v:6}  {k}"); }
-    worst.sort_by(|a, b| b.0.cmp(&a.0));
+    worst.sort_by_key(|w| std::cmp::Reverse(w.0));
     println!("models with skipped primitives: {}", worst.len());
     for (n, name) in worst.iter().take(15) { println!("  {n:4} skipped  {name}"); }
     Ok(())

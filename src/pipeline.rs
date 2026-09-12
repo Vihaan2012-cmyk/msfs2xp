@@ -134,7 +134,7 @@ fn summary_row(r: &Report) -> String {
         r.icao,
         r.name.chars().take(34).collect::<String>(),
         c("runways") + c("water runways") + c("helipads"),
-        c("pavement polygons"),
+        c("apron polygons") + c("taxiway surface polygons"),
         c("painted lines") + c("taxiway centrelines") + c("taxiway edge lines") + c("hold-short bars"),
         c("taxi network edges"),
         c("ramp starts"),
