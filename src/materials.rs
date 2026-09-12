@@ -134,7 +134,7 @@ fn has_any(name: &str, words: &[&str]) -> bool {
 /// Ground materials that are markings or dirt layered over the pavement, not
 /// the pavement itself.
 const DECAL_WORDS: &[&str] = &[
-    "number", "letter", "decal", "arrow", "tire", "tyre", "skid", "hatch", "atlas", "stain", "oil", "crack", "seam",
+    "number", "letter", "decal", "zebra", "chevron", "squares", "gp_frame", "grime", "dirt_turn", "runway_dirt", "tirebend", "arrow", "tire", "tyre", "skid", "hatch", "atlas", "stain", "oil", "crack", "seam",
     "grunge", "text", "logo", "sign",
 ];
 
@@ -142,7 +142,8 @@ const DECAL_WORDS: &[&str] = &[
 /// pavement, `None` when it is a decal or cannot be classified by name.
 pub fn classify_ground(info: &MaterialInfo) -> GroundClass {
     let name = info.name.to_ascii_lowercase();
-    if has_any(&name, DECAL_WORDS) {
+    // iniBuilds "INI_Dirt_*" materials are grime laid over pavement, not dirt ground.
+    if has_any(&name, DECAL_WORDS) || name.starts_with("ini_dirt_") {
         return GroundClass::Decal;
     }
     // Soft ground is checked first: Asobo's "CEMENTDIRT01" is a dirt ground
@@ -327,6 +328,10 @@ mod tests {
         );
         assert_eq!(classify_ground(&info("INI_Number_3", "PAINT")), GroundClass::Decal);
         assert_eq!(classify_ground(&info("INI_Dirt_TireBend", "PAINT")), GroundClass::Decal);
+        assert_eq!(classify_ground(&info("INI_Dirt_Turn90", "ASPHALT")), GroundClass::Decal);
+        assert_eq!(classify_ground(&info("INI_Runway_Dirt", "ASPHALT")), GroundClass::Decal);
+        assert_eq!(classify_ground(&info("INI_Asphalt_1_gp_frame", "ASPHALT")), GroundClass::Decal);
+        assert_eq!(classify_ground(&info("INI_Zebra", "CONCRETE")), GroundClass::Decal);
         assert_eq!(classify_ground(&info("Mystery", "UNDEFINED")), GroundClass::Unknown);
     }
 

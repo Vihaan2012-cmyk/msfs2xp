@@ -213,7 +213,7 @@ pub struct RawApron {
     pub draw_detail: bool,
     /// `(lat, lon)` boundary vertices.
     pub vertices: Vec<(f64, f64)>,
-    /// MSFS flag byte (bit 2 marks a decal laid over the pavement).
+    /// MSFS flag byte (meaning varies between airports; not used to find decals).
     pub flags: u8,
     /// RGBA tint multiplied into the material.
     pub tint: [u8; 4],

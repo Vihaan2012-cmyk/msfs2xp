@@ -477,9 +477,10 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
             } else {
                 surface_from_code(a.surface)
             },
-            // Bit 2 marks a decal laid over the pavement: stand numbers, arrows,
-            // tyre marks. X-Plane pavement cannot layer those, so they are not drawn.
-            draw: a.draw_surface && !(a.material.is_some() && a.flags & 0x04 != 0),
+            // The MSFS flag byte does not reliably mark decals (O'Hare's base
+            // asphalt and Dubai's use different bits), so overlays are found by
+            // material name when the materials are resolved.
+            draw: a.draw_surface,
             vertices: a.vertices.iter().map(|&(lat, lon)| LatLon::new(lat, lon)).collect(),
             material_guid: a.material,
             material_name: None,
