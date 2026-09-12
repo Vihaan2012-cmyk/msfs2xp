@@ -556,7 +556,10 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
         apron_edge_lights: raw
             .apron_edge_lights
             .iter()
-            .map(|poly| poly.iter().map(|&(lat, lon)| LatLon::new(lat, lon)).collect())
+            .map(|s| LightString {
+                name: s.name.clone(),
+                points: s.vertices.iter().map(|&(lat, lon)| LatLon::new(lat, lon)).collect(),
+            })
             .collect(),
         painted_lines,
         signs,

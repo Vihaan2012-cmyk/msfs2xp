@@ -524,6 +524,14 @@ pub struct SourceInfo {
     pub layout: String,
 }
 
+/// A string of taxiway lights and the MSFS preset that styles it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LightString {
+    /// Preset name ("ini-blue-edge", "Stop Bar Lights"); empty when unknown.
+    pub name: String,
+    pub points: Vec<LatLon>,
+}
+
 /// A complete airport, independent of which simulator described it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Airport {
@@ -548,7 +556,7 @@ pub struct Airport {
     pub taxi_paths: Vec<TaxiPath>,
     pub parkings: Vec<Parking>,
     pub aprons: Vec<Apron>,
-    pub apron_edge_lights: Vec<Vec<LatLon>>,
+    pub apron_edge_lights: Vec<LightString>,
     pub painted_lines: Vec<PaintedLine>,
     pub signs: Vec<Sign>,
     pub windsocks: Vec<Windsock>,

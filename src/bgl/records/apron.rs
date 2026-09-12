@@ -11,9 +11,9 @@ use crate::bgl::reader::BglError;
 
 use crate::bgl::guid::Guid;
 
-use super::geoscan::{count_matches, find_vertex_run, read_vertices, Near};
+use super::geoscan::{count_matches, find_vertex_run, read_vertices, run_length, Near};
 use super::ids::*;
-use super::raw::RawApron;
+use super::raw::{RawApron, RawLightString};
 
 /// Apron boundary record (`0x37`, `0xAF`, `0xD3`, `0xD0`).
 pub fn parse_apron(rec: &RecordSlice, near: &Near, warnings: &mut Vec<String>) -> Result<RawApron, BglError> {
@@ -105,12 +105,34 @@ pub fn parse_apron2(rec: &RecordSlice) -> Result<RawApron, BglError> {
     })
 }
 
-/// Apron edge lights (`0x31`): polylines along which lights are drawn.
-pub fn parse_apron_edge_lights(rec: &RecordSlice, near: &Near) -> Result<Vec<(f64, f64)>, BglError> {
-    match find_vertex_run(rec.data, near, 2) {
-        Some((at, count)) => Ok(read_vertices(rec.data, at, count)),
-        None => Ok(Vec::new()),
+/// Light strings (`0x31`): a vertex count at 8, the name's length at 10, the
+/// light spacing (f32) at 20, vertices from 24 and then the MSFS light preset's
+/// name. Records without that layout fall back to a vertex scan.
+pub fn parse_apron_edge_lights(rec: &RecordSlice, near: &Near) -> Result<RawLightString, BglError> {
+    let d = rec.data;
+    if d.len() >= 24 {
+        let count = u16::from_le_bytes([d[8], d[9]]) as usize;
+        let name_len = u16::from_le_bytes([d[10], d[11]]) as usize;
+        let end = 24 + count * 8;
+        if count >= 2 && end + name_len <= d.len() && run_length(d, 24, near) >= count {
+            let name = String::from_utf8_lossy(&d[end..end + name_len])
+                .trim_end_matches('\0')
+                .trim()
+                .to_string();
+            return Ok(RawLightString {
+                name,
+                vertices: read_vertices(d, 24, count),
+            });
+        }
     }
+    let vertices = match find_vertex_run(d, near, 2) {
+        Some((at, count)) => read_vertices(d, at, count),
+        None => Vec::new(),
+    };
+    Ok(RawLightString {
+        name: String::new(),
+        vertices,
+    })
 }
 
 #[cfg(test)]
@@ -207,7 +229,34 @@ mod tests {
             data: &bytes,
         };
         let v = parse_apron_edge_lights(&rec, &Near::new(LAT, LON)).unwrap();
-        assert_eq!(v.len(), 3);
+        assert_eq!(v.vertices.len(), 3);
+        assert!(v.name.is_empty());
+    }
+
+    #[test]
+    fn reads_the_msfs_light_preset_name() {
+        // The layout O'Hare and Dubai use: vertex count, name length, spacing,
+        // vertices, name.
+        let body = Bytes::new()
+            .u16(0x0100)
+            .u16(2)
+            .u16(16)
+            .zeros(8)
+            .f32(3.0)
+            .pos2(LAT, LON)
+            .pos2(LAT + 0.0005, LON)
+            .raw(b"Holdshort Lights")
+            .done();
+        let bytes = record(AP_APRON_EDGE_LIGHTS, &body);
+        let rec = RecordSlice {
+            id: AP_APRON_EDGE_LIGHTS,
+            offset: 0,
+            data: &bytes,
+        };
+        let v = parse_apron_edge_lights(&rec, &Near::new(LAT, LON)).unwrap();
+        assert_eq!(v.name, "Holdshort Lights");
+        assert_eq!(v.vertices.len(), 2);
+        assert!((v.vertices[1].0 - (LAT + 0.0005)).abs() < 1e-6);
     }
 
     #[test]

@@ -159,7 +159,7 @@ pub fn parse_airport(rec: &RecordSlice, hint: Option<Variant>) -> Result<RawAirp
             }
             AP_APRON_EDGE_LIGHTS => {
                 if let Ok(v) = apron::parse_apron_edge_lights(&sub, &near) {
-                    if v.len() >= 2 {
+                    if v.vertices.len() >= 2 {
                         ap.apron_edge_lights.push(v);
                     }
                 }

@@ -62,7 +62,7 @@ pub struct RawAirport {
     pub taxi_paths: Vec<RawTaxiPath>,
     pub parkings: Vec<RawParking>,
     pub aprons: Vec<RawApron>,
-    pub apron_edge_lights: Vec<Vec<(f64, f64)>>,
+    pub apron_edge_lights: Vec<RawLightString>,
     pub painted_lines: Vec<RawPaintedLine>,
     pub signs: Vec<RawSign>,
     pub jetways: Vec<RawJetway>,
@@ -71,6 +71,15 @@ pub struct RawAirport {
     pub warnings: Vec<String>,
     /// `(record id, byte size)` of records we chose not to interpret.
     pub unknown_records: Vec<(u16, usize)>,
+}
+
+/// A string of airport lights (`0x31`, "apron edge lights" in the SDK). MSFS
+/// sceneries use it for every kind of taxiway light; the preset name says which.
+#[derive(Debug, Clone, Default)]
+pub struct RawLightString {
+    /// Light preset name, such as "ini-green-centre-custom" or "Stop Bar Lights".
+    pub name: String,
+    pub vertices: Vec<(f64, f64)>,
 }
 
 /// A jetway: the stand it serves and, when recorded, where its model sits.
