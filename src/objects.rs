@@ -156,6 +156,14 @@ fn triangle_budget(radius: f32, max: usize) -> usize {
     ((8000.0 * radius.max(0.1).powf(1.5)) as usize).clamp(3000.min(max), max)
 }
 
+/// Terminal interiors and clutter: seen only through the glass, so they get
+/// a quarter of the triangle budget. At Dubai they hold as much geometry as
+/// the terminals themselves.
+fn is_interior(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("interior") || n.contains("clutter")
+}
+
 /// The largest texture side for a model of this radius: the full size for
 /// terminals (60 m and up), half for hangars, piers and towers, a quarter for
 /// vehicles and an eighth for people and small props, which never cover
@@ -348,11 +356,16 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 // million triangles, and a single person is 50,000. The budget
                 // follows the model's size, measured on the first level loaded.
                 let mut lod = opts.lod.min(last);
+                let max_triangles = if is_interior(&info.name) {
+                    opts.max_triangles / 4
+                } else {
+                    opts.max_triangles
+                };
                 let mut budget = None;
                 let model = loop {
                     let glb = lib.load_lod(&guid, lod).map_err(|e| e.to_string())?;
                     let m = load_glb(&glb).map_err(|e| e.to_string())?;
-                    let limit = *budget.get_or_insert_with(|| triangle_budget(model_radius(&m, scale), opts.max_triangles));
+                    let limit = *budget.get_or_insert_with(|| triangle_budget(model_radius(&m, scale), max_triangles));
                     if m.triangle_count() <= limit || lod >= last {
                         break m;
                     }
@@ -360,9 +373,12 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 };
                 // A coarser MSFS level for distant views: the first with at most a
                 // third of the triangles (MSFS roughly halves them per level).
+                // Models 50 m and larger go without: they switch only beyond 2 km,
+                // and a second copy of a terminal costs more memory than it saves.
+                let radius = model_radius(&model, scale);
                 let base_tris = model.triangle_count();
                 let mut far_model = None;
-                for l in lod + 1..=last {
+                for l in (lod + 1..=last).filter(|_| radius < 50.0) {
                     let Some(m) = lib.load_lod(&guid, l).ok().and_then(|b| load_glb(&b).ok()) else {
                         break;
                     };
@@ -373,7 +389,6 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                     }
                 }
                 let (near_to, draw_to) = draw_distances(&model, scale);
-                let radius = model_radius(&model, scale);
                 let base = if info.name.is_empty() { guid.to_string() } else { info.name.clone() };
                 let mut suffix = if (scale - 1.0).abs() > 1e-3 { format!("_s{}", k.1) } else { String::new() };
                 if quarters != 0 {
@@ -606,6 +621,13 @@ mod tests {
         assert_eq!(texture_cap(30.0, 2048), 1024, "hangars and piers");
         assert_eq!(texture_cap(f32::INFINITY, 2048), 2048, "terminals and decals");
         assert_eq!(texture_cap(1.0, 512), 256, "never below 256");
+    }
+
+    #[test]
+    fn interiors_are_recognised_by_name() {
+        assert!(is_interior("OMDB_Terminal_D_Interior_A"));
+        assert!(is_interior("OMDB_Concourse_C_Clutter"));
+        assert!(!is_interior("OMDB_Terminal_D_Exterior"));
     }
 
     #[test]
