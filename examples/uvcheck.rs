@@ -58,6 +58,38 @@ fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+            // With MAT set: the nodes whose meshes use a material of that name,
+            // with their names, extensions and extras.
+            if let (Some(_), Ok(want)) = (&only, std::env::var("MAT")) {
+                let want = want.to_ascii_lowercase();
+                let mats: Vec<usize> = j["materials"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .filter(|(_, m)| m["name"].as_str().is_some_and(|n| n.to_ascii_lowercase().contains(&want)))
+                    .map(|(i, _)| i)
+                    .collect();
+                for node in j["nodes"].as_array().into_iter().flatten() {
+                    let Some(mi) = node["mesh"].as_u64() else { continue };
+                    let mesh = &j["meshes"][mi as usize];
+                    let uses = mesh["primitives"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|p| p["material"].as_u64().is_some_and(|m| mats.contains(&(m as usize))));
+                    if uses {
+                        println!(
+                            "  node {:?} mesh {:?} ext {} extras {} prims {}",
+                            node["name"].as_str().unwrap_or("-"),
+                            mesh["name"].as_str().unwrap_or("-"),
+                            node["extensions"],
+                            node["extras"],
+                            mesh["primitives"].as_array().map_or(0, Vec::len)
+                        );
+                    }
+                }
+            }
             for m in j["materials"].as_array().into_iter().flatten() {
                 for (k, _) in m["extensions"].as_object().into_iter().flatten() {
                     note(format!("material extension {k}"), name);
