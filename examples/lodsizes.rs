@@ -38,7 +38,14 @@ fn main() -> anyhow::Result<()> {
                 }
                 cols.push(format!("{}:{}", lod.min_size, tris));
             }
-            println!("{:<44} r={:6.1}  {}", info.name, radius, cols.join("  "));
+            let extent = lib
+                .load_lod(g, 0)
+                .ok()
+                .and_then(|b| load_glb(&b).ok())
+                .and_then(|m| m.bounds())
+                .map(|(lo, hi)| format!("x {:.1}..{:.1} y {:.1}..{:.1} z {:.1}..{:.1}", lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]))
+                .unwrap_or_default();
+            println!("{:<44} r={:6.1}  {}  {}", info.name, radius, cols.join("  "), extent);
         }
     }
     Ok(())

@@ -87,6 +87,10 @@ pub struct ConvertArgs {
     /// Step down to coarser model LODs until each model has at most this many triangles.
     #[arg(long, default_value_t = 500_000)]
     pub max_tris: usize,
+
+    /// Largest texture side for buildings; vehicles get half, people and small props a quarter.
+    #[arg(long, default_value_t = 2048)]
+    pub max_texture: u32,
 }
 
 #[derive(clap::Args, Debug)]

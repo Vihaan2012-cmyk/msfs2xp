@@ -452,29 +452,126 @@ pub fn to_png(img: &TextureImage) -> Result<Vec<u8>, TextureError> {
 pub struct Converted {
     pub bytes: Vec<u8>,
     pub extension: &'static str,
+    /// Roughly what the texture occupies in video memory, mip chain included.
+    pub vram_bytes: usize,
 }
 
 /// Convert any MSFS texture into something X-Plane 12 loads.
 pub fn convert_for_xplane(data: &[u8]) -> Result<Converted, TextureError> {
+    convert_for_xplane_capped(data, u32::MAX)
+}
+
+/// Whether a texture goes out as DDS: BC1-3 whose top level flips cleanly.
+fn writes_dds(img: &TextureImage) -> bool {
+    matches!(img.format, PixelFormat::Bc1 | PixelFormat::Bc2 | PixelFormat::Bc3)
+        && img
+            .mips
+            .first()
+            .is_some_and(|m| flip_bc_level(img.format, m, img.width, img.height).is_some())
+}
+
+/// The extension [`convert_for_xplane_capped`] gives this texture at any cap,
+/// so objects can name a texture before it is written.
+pub fn output_extension(data: &[u8]) -> Result<&'static str, TextureError> {
     if detect(data) == SourceFormat::Png {
-        return Ok(Converted {
-            bytes: data.to_vec(),
-            extension: "png",
-        });
+        return Ok("png");
     }
-    let img = load(data)?;
-    if matches!(img.format, PixelFormat::Bc1 | PixelFormat::Bc2 | PixelFormat::Bc3) {
-        if let Ok(bytes) = to_xplane_dds(&img) {
-            return Ok(Converted {
-                bytes,
-                extension: "dds",
-            });
+    Ok(if writes_dds(&load(data)?) { "dds" } else { "png" })
+}
+
+/// The first level whose longer side fits `max_side`, or the smallest level
+/// allowed. DDS output needs every level a whole number of blocks tall.
+fn first_level_within(img: &TextureImage, max_side: u32, whole_blocks: bool) -> usize {
+    let mut best = 0;
+    for i in 0..img.mips.len() {
+        let (w, h) = level_dims(img.width, img.height, i);
+        if i > 0 && whole_blocks && h % 4 != 0 {
+            break;
+        }
+        best = i;
+        if w.max(h) <= max_side {
+            break;
         }
     }
+    best
+}
+
+/// The image from level `first` down.
+fn from_level(img: &TextureImage, first: usize) -> TextureImage {
+    let (width, height) = level_dims(img.width, img.height, first);
+    TextureImage {
+        width,
+        height,
+        format: img.format,
+        mips: img.mips[first..].to_vec(),
+    }
+}
+
+/// Encode RGBA8 as PNG, shrunk to fit `max_side` when it is larger.
+fn png_within(rgba: Vec<u8>, w: u32, h: u32, max_side: u32) -> Result<Converted, TextureError> {
+    let mut img = image::RgbaImage::from_raw(w, h, rgba)
+        .ok_or_else(|| TextureError::Unsupported("pixel data does not match its size".into()))?;
+    if w.max(h) > max_side {
+        let k = max_side as f64 / w.max(h) as f64;
+        let nw = ((w as f64 * k).round() as u32).max(1);
+        let nh = ((h as f64 * k).round() as u32).max(1);
+        img = image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle);
+    }
+    let (w, h) = img.dimensions();
+    let mut out = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut out);
+    image::ImageEncoder::write_image(encoder, img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+        .map_err(|e| TextureError::Png(e.to_string()))?;
     Ok(Converted {
-        bytes: to_png(&img)?,
+        bytes: out,
         extension: "png",
+        // X-Plane compresses PNGs as it loads them, to about a byte a pixel.
+        vram_bytes: w as usize * h as usize * 4 / 3,
     })
+}
+
+/// Convert any MSFS texture, keeping its longer side at most `max_side`.
+/// Block-compressed textures drop their largest mip levels, which costs
+/// nothing beyond the lower resolution; everything else is resized.
+pub fn convert_for_xplane_capped(data: &[u8], max_side: u32) -> Result<Converted, TextureError> {
+    if detect(data) == SourceFormat::Png {
+        // Size from the IHDR chunk; a PNG that fits, or whose size cannot be
+        // read, passes through untouched.
+        let dims = (data.len() >= 24).then(|| {
+            (
+                u32::from_be_bytes([data[16], data[17], data[18], data[19]]),
+                u32::from_be_bytes([data[20], data[21], data[22], data[23]]),
+            )
+        });
+        let (w, h) = match dims {
+            Some((w, h)) if w.max(h) > max_side => (w, h),
+            _ => {
+                return Ok(Converted {
+                    bytes: data.to_vec(),
+                    extension: "png",
+                    vram_bytes: dims.map_or(0, |(w, h)| w as usize * h as usize * 4 / 3),
+                })
+            }
+        };
+        let img = image::load_from_memory_with_format(data, image::ImageFormat::Png)
+            .map_err(|e| TextureError::Png(e.to_string()))?
+            .to_rgba8();
+        return png_within(img.into_raw(), w, h, max_side);
+    }
+    let img = load(data)?;
+    if writes_dds(&img) {
+        let small = from_level(&img, first_level_within(&img, max_side, true));
+        let bytes = to_xplane_dds(&small)?;
+        let vram_bytes = bytes.len().saturating_sub(128);
+        return Ok(Converted {
+            bytes,
+            extension: "dds",
+            vram_bytes,
+        });
+    }
+    let small = from_level(&img, first_level_within(&img, max_side, false));
+    let rgba = decode_rgba8(&small, 0)?;
+    png_within(rgba, small.width, small.height, max_side)
 }
 
 #[cfg(test)]
@@ -509,6 +606,35 @@ mod tests {
             out.extend_from_slice(l);
         }
         out
+    }
+
+    #[test]
+    fn capped_textures_drop_their_largest_levels() {
+        let levels: Vec<Vec<u8>> = [(16, 1), (8, 2), (4, 3)]
+            .iter()
+            .map(|&(side, seed)| noise(level_size(PixelFormat::Bc1, side, side), seed))
+            .collect();
+        let data = ktx2(131, 16, 16, &levels, 0);
+        let full = convert_for_xplane(&data).unwrap();
+        let small = convert_for_xplane_capped(&data, 8).unwrap();
+        assert_eq!((full.extension, small.extension), ("dds", "dds"));
+        assert_eq!(output_extension(&data).unwrap(), "dds");
+        let dims = |b: &[u8]| {
+            let at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+            (at(16), at(12), at(28))
+        };
+        assert_eq!(dims(&full.bytes), (16, 16, 3));
+        assert_eq!(dims(&small.bytes), (8, 8, 2), "the 16 px level is dropped");
+        assert!(small.vram_bytes < full.vram_bytes);
+    }
+
+    #[test]
+    fn capped_uncompressed_textures_are_resized() {
+        let data = ktx2(37, 8, 4, &[noise(8 * 4 * 4, 5)], 0);
+        let c = convert_for_xplane_capped(&data, 4).unwrap();
+        assert_eq!(c.extension, "png");
+        let img = image::load_from_memory_with_format(&c.bytes, image::ImageFormat::Png).unwrap();
+        assert_eq!((img.width(), img.height()), (4, 2));
     }
 
     fn vflip(rgba: &[u8], w: usize, h: usize) -> Vec<u8> {

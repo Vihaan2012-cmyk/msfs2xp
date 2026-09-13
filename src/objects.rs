@@ -30,6 +30,8 @@ pub struct ObjectsReport {
     pub models_converted: usize,
     pub object_files: usize,
     pub textures_written: usize,
+    /// Roughly the video memory the written textures take.
+    pub texture_vram_mb: f64,
     pub triangles: usize,
     /// Placements whose model was found in neither the package nor a stock
     /// library on disk (usually MSFS 2024 stock objects, which are streamed).
@@ -53,6 +55,9 @@ pub struct ObjectOptions {
     pub lod: usize,
     /// Step down to coarser LODs until a model has at most this many triangles.
     pub max_triangles: usize,
+    /// Largest texture side, for buildings; vehicles get half, people and small
+    /// props a quarter.
+    pub max_texture: u32,
 }
 
 impl Default for ObjectOptions {
@@ -60,6 +65,7 @@ impl Default for ObjectOptions {
         ObjectOptions {
             lod: 0,
             max_triangles: 500_000,
+            max_texture: 2048,
         }
     }
 }
@@ -124,10 +130,7 @@ type ModelOutcome = Result<(Vec<String>, usize), String>;
 /// the way MSFS picks levels by screen size: 400 radii away a model spans a
 /// few pixels, so props fade out while large buildings (50 m and up) never do.
 fn draw_distances(model: &crate::model3d::glb::Model, scale: f32) -> (f32, f32) {
-    let radius = model.bounds().map_or(1.0, |(lo, hi)| {
-        let diagonal: f32 = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f32>().sqrt();
-        diagonal / 2.0 * if scale > 0.0 { scale } else { 1.0 }
-    });
+    let radius = model_radius(model, scale);
     let far = if radius >= 50.0 {
         f32::INFINITY
     } else {
@@ -135,6 +138,35 @@ fn draw_distances(model: &crate::model3d::glb::Model, scale: f32) -> (f32, f32) 
     };
     let near = (radius * 40.0).clamp(30.0, far.min(100_000.0) / 2.0).round();
     (near, far)
+}
+
+/// Half the diagonal of a model's bounding box, in metres after scaling.
+fn model_radius(model: &crate::model3d::glb::Model, scale: f32) -> f32 {
+    model.bounds().map_or(1.0, |(lo, hi)| {
+        let diagonal: f32 = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f32>().sqrt();
+        diagonal / 2.0 * if scale > 0.0 { scale } else { 1.0 }
+    })
+}
+
+/// The most triangles worth keeping for a model of this radius. A person
+/// (about 1 m) gets roughly 8,000, which still looks round close up, and the
+/// budget grows with size up to `max`. Every placed object's geometry stays in
+/// video memory, so detail on small props is the cheapest to give up.
+fn triangle_budget(radius: f32, max: usize) -> usize {
+    ((8000.0 * radius.max(0.1).powf(1.5)) as usize).clamp(3000.min(max), max)
+}
+
+/// The largest texture side for a model of this radius. Props a few metres
+/// across never cover enough of the screen to use more.
+fn texture_cap(radius: f32, max: u32) -> u32 {
+    let floor = 256.min(max);
+    if radius < 3.0 {
+        (max / 4).max(floor)
+    } else if radius < 15.0 {
+        (max / 2).max(floor)
+    } else {
+        max
+    }
 }
 
 fn remove_dsf_tiles(nav: &Path) -> std::io::Result<()> {
@@ -265,31 +297,37 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         textures.extend(texture_index(dir));
     }
     textures.extend(texture_index(&loaded.source.root));
-    let written_textures: Mutex<HashMap<String, Option<String>>> = Mutex::new(HashMap::new());
+    // Textures are planned while models convert and written afterwards, once
+    // the largest model using each is known, because that sets its resolution.
+    // Lower-case name -> (output file, source file, largest model radius).
+    type Plan = Option<(String, PathBuf, f32)>;
+    let planned: Mutex<HashMap<String, Plan>> = Mutex::new(HashMap::new());
     let missing: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 
-    // Convert (or reuse) a texture, returning its path relative to the objects.
-    let texture_for = |name: &str| -> Option<String> {
+    // Plan a texture for a model of the given radius, returning its path
+    // relative to the objects.
+    let texture_for = |name: &str, radius: f32| -> Option<String> {
         let lower = name.to_ascii_lowercase();
-        if let Some(done) = written_textures.lock().ok()?.get(&lower) {
-            return done.clone();
+        if let Some(entry) = planned.lock().ok()?.get_mut(&lower) {
+            let (file, _, r) = entry.as_mut()?;
+            *r = r.max(radius);
+            return Some(format!("textures/{file}"));
         }
-        let result = textures.get(&lower).and_then(|src| {
+        let plan = textures.get(&lower).and_then(|src| {
             let data = std::fs::read(src).ok()?;
-            let converted = texture::convert_for_xplane(&data).ok()?;
-            let file = format!("{}.{}", texture_stem(name), converted.extension);
-            std::fs::write(textures_dir.join(&file), &converted.bytes).ok()?;
-            Some(format!("textures/{file}"))
+            let ext = texture::output_extension(&data).ok()?;
+            Some((format!("{}.{}", texture_stem(name), ext), src.clone(), radius))
         });
-        if result.is_none() {
+        if plan.is_none() {
             if let Ok(mut m) = missing.lock() {
                 m.insert(name.to_string());
             }
         }
-        if let Ok(mut w) = written_textures.lock() {
-            w.insert(lower, result.clone());
-        }
-        result
+        // Another thread may have planned it meanwhile; keep the larger radius.
+        let mut map = planned.lock().ok()?;
+        let (file, _, r) = map.entry(lower).or_insert(plan).as_mut()?;
+        *r = r.max(radius);
+        Some(format!("textures/{file}"))
     };
 
     // Convert models in parallel. Each yields the object files it produced.
@@ -302,13 +340,16 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 let info = lib.info(&guid).map_err(|e| e.to_string())?;
                 let last = info.lods.len().saturating_sub(1);
                 // Start at the requested LOD and step down until the model fits
-                // the triangle budget: MSFS LOD0 of a landmark can exceed a
-                // million triangles, far more than X-Plane should draw per object.
+                // its triangle budget: MSFS LOD0 of a landmark can exceed a
+                // million triangles, and a single person is 50,000. The budget
+                // follows the model's size, measured on the first level loaded.
                 let mut lod = opts.lod.min(last);
+                let mut budget = None;
                 let model = loop {
                     let glb = lib.load_lod(&guid, lod).map_err(|e| e.to_string())?;
                     let m = load_glb(&glb).map_err(|e| e.to_string())?;
-                    if m.triangle_count() <= opts.max_triangles || lod >= last {
+                    let limit = *budget.get_or_insert_with(|| triangle_budget(model_radius(&m, scale), opts.max_triangles));
+                    if m.triangle_count() <= limit || lod >= last {
                         break m;
                     }
                     lod += 1;
@@ -328,6 +369,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                     }
                 }
                 let (near_to, draw_to) = draw_distances(&model, scale);
+                let radius = model_radius(&model, scale);
                 let base = if info.name.is_empty() { guid.to_string() } else { info.name.clone() };
                 let mut suffix = if (scale - 1.0).abs() > 1e-3 { format!("_s{}", k.1) } else { String::new() };
                 if quarters != 0 {
@@ -357,8 +399,8 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                         .unwrap_or_default()
                 };
                 for (i, key) in keys.iter().enumerate() {
-                    let texture = key.0.as_deref().and_then(&texture_for);
-                    let texture_lit = key.1.as_deref().and_then(&texture_for);
+                    let texture = key.0.as_deref().and_then(|t| texture_for(t, radius));
+                    let texture_lit = key.1.as_deref().and_then(|t| texture_for(t, radius));
                     let options = ObjOptions {
                         texture,
                         scale,
@@ -440,7 +482,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         let key = (d.texture.to_ascii_lowercase(), d.stretched, grime);
         let def = match def_of.get(&key) {
             Some(&i) => Some(i),
-            None => match texture_for(&d.texture) {
+            None => match texture_for(&d.texture, f32::INFINITY) {
                 Some(rel) => {
                     std::fs::create_dir_all(&decal_dir)?;
                     let file = format!(
@@ -481,11 +523,34 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         std::fs::write(&path, bytes)?;
         report.dsf_tiles.push(rel.display().to_string());
     }
-    report.textures_written = written_textures
-        .lock()
-        .map(|w| w.values().filter(|v| v.is_some()).count())
-        .unwrap_or(0);
-    let mut missing: Vec<String> = missing.into_inner().unwrap_or_default().into_iter().collect();
+    // Write every planned texture, sized for the largest model that uses it.
+    let plans: Vec<(String, PathBuf, f32)> = planned.into_inner().unwrap_or_default().into_values().flatten().collect();
+    let written: Vec<Result<usize, String>> = plans
+        .par_iter()
+        .map(|(file, src, radius)| {
+            let data = std::fs::read(src).map_err(|e| e.to_string())?;
+            let c = texture::convert_for_xplane_capped(&data, texture_cap(*radius, opts.max_texture))
+                .map_err(|e| e.to_string())?;
+            if !file.ends_with(c.extension) {
+                return Err(format!("came out as {}", c.extension));
+            }
+            std::fs::write(textures_dir.join(file), &c.bytes).map_err(|e| e.to_string())?;
+            Ok(c.vram_bytes)
+        })
+        .collect();
+    let mut missing = missing.into_inner().unwrap_or_default();
+    for ((file, _, _), r) in plans.iter().zip(&written) {
+        match r {
+            Ok(bytes) => {
+                report.textures_written += 1;
+                report.texture_vram_mb += *bytes as f64 / 1e6;
+            }
+            Err(e) => {
+                missing.insert(format!("{file}: {e}"));
+            }
+        }
+    }
+    let mut missing: Vec<String> = missing.into_iter().collect();
     missing.sort();
     report.missing_textures = missing;
     Ok(report)
@@ -523,6 +588,17 @@ mod tests {
         assert_eq!(draw_distances(&sized(0.3), 1.0), (30.0, 300.0), "small props keep a floor");
         assert_eq!(draw_distances(&sized(1.0), 2.0), (80.0, 800.0), "scale counts");
         assert!(draw_distances(&sized(200.0), 1.0).1.is_infinite(), "terminals never fade");
+    }
+
+    #[test]
+    fn small_models_get_fewer_triangles_and_smaller_textures() {
+        assert_eq!(triangle_budget(1.0, 500_000), 8000, "a person");
+        assert_eq!(triangle_budget(0.2, 500_000), 3000, "a floor for tiny props");
+        assert_eq!(triangle_budget(200.0, 500_000), 500_000, "terminals keep the full budget");
+        assert_eq!(texture_cap(1.0, 2048), 512);
+        assert_eq!(texture_cap(8.0, 2048), 1024);
+        assert_eq!(texture_cap(f32::INFINITY, 2048), 2048);
+        assert_eq!(texture_cap(1.0, 512), 256);
     }
 
     #[test]

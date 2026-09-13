@@ -243,16 +243,18 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                 let opts = crate::objects::ObjectOptions {
                     lod: args.lod,
                     max_triangles: args.max_tris,
+                    max_texture: args.max_texture,
                 };
                 match crate::objects::build(&loaded, &dir, &opts) {
                     Ok(r) => {
                         println!(
-                            "  objects: {} of {} placements from {} models: {} object files, {} textures, {:.1}M triangles, {} DSF tile(s), {:.0}s",
+                            "  objects: {} of {} placements from {} models: {} object files, {} textures ({:.0} MB), {:.1}M triangles, {} DSF tile(s), {:.0}s",
                             r.placed,
                             r.placements,
                             r.models_converted,
                             r.object_files,
                             r.textures_written,
+                            r.texture_vram_mb,
                             r.triangles as f64 / 1e6,
                             r.dsf_tiles.len(),
                             began.elapsed().as_secs_f64()
