@@ -70,6 +70,10 @@ pub struct Material {
     pub double_sided: bool,
     /// Asobo geometry decal: drawn slightly above the surface it sits on.
     pub decal: bool,
+    /// MSFS UV tiling and offset (ASOBO_material_UV_options): the texture
+    /// repeats `uv_tiling` times over the mesh's UV range.
+    pub uv_tiling: [f32; 2],
+    pub uv_offset: [f32; 2],
 }
 
 impl Default for Material {
@@ -86,6 +90,8 @@ impl Default for Material {
             alpha_cutoff: 0.5,
             double_sided: false,
             decal: false,
+            uv_tiling: [1.0, 1.0],
+            uv_offset: [0.0, 0.0],
         }
     }
 }
@@ -496,7 +502,13 @@ fn material(json: &Value, m: &Value) -> (Material, bool) {
         .unwrap_or([1.0; 4]);
     let ext = &m["extensions"];
     let name = m["name"].as_str().unwrap_or_default().to_string();
-    let invisible = !ext["ASOBO_material_invisible"].is_null();
+    // Hidden in MSFS: invisible materials, and geometry decals that blend no
+    // colour (they only change the surface's normals or roughness, so their
+    // texture would show here as stray patches).
+    let colourless = ext["ASOBO_material_geometry_decal"]["baseColorBlendFactor"].as_f64() == Some(0.0);
+    let invisible = !ext["ASOBO_material_invisible"].is_null() || colourless;
+    let uv = &ext["ASOBO_material_UV_options"];
+    let uv_num = |k: &str, default: f64| uv[k].as_f64().unwrap_or(default) as f32;
     (
         Material {
             base_color: texture_file(json, pbr["baseColorTexture"]["index"].as_u64()),
@@ -515,6 +527,8 @@ fn material(json: &Value, m: &Value) -> (Material, bool) {
             alpha_cutoff: m["alphaCutoff"].as_f64().unwrap_or(0.5) as f32,
             double_sided: m["doubleSided"].as_bool().unwrap_or(false),
             decal: !ext["ASOBO_material_geometry_decal"].is_null(),
+            uv_tiling: [uv_num("UVTilingU", 1.0), uv_num("UVTilingV", 1.0)],
+            uv_offset: [uv_num("UVOffsetU", 0.0), uv_num("UVOffsetV", 0.0)],
             name,
         },
         invisible,
@@ -731,6 +745,7 @@ pub fn load_glb(bytes: &[u8]) -> Result<Model, ModelError> {
                     t.swap(1, 2);
                 }
             }
+            let (tile, shift) = (model.materials[material].uv_tiling, model.materials[material].uv_offset);
             let mut vertices: Vec<Vertex> = used
                 .iter()
                 .map(|&i| (i, &positions[i]))
@@ -741,7 +756,11 @@ pub fn load_glb(bytes: &[u8]) -> Result<Model, ModelError> {
                         .and_then(|n| n.get(i))
                         .map(|n| transform_normal(&nm, *n))
                         .unwrap_or([0.0, 1.0, 0.0]),
-                    uv: uvs.as_ref().and_then(|u| u.get(i)).copied().unwrap_or([0.0, 0.0]),
+                    uv: uvs
+                        .as_ref()
+                        .and_then(|u| u.get(i))
+                        .map(|u| [u[0] * tile[0] + shift[0], u[1] * tile[1] + shift[1]])
+                        .unwrap_or([0.0, 0.0]),
                 })
                 .collect();
             if normals.is_none() {
@@ -977,5 +996,21 @@ pub(crate) mod tests {
             ok += 1;
         }
         eprintln!("{ok} models, {tris} triangles");
+    }
+
+    #[test]
+    fn msfs_uv_tiling_repeats_the_texture() {
+        let glb = asobo_triangle(r#","extensions":{"ASOBO_material_UV_options":{"UVTilingU":10.0,"UVTilingV":4.0}}"#);
+        let m = load_glb(&glb).unwrap();
+        let uv = m.meshes[0].vertices[0].uv;
+        assert!((uv[0] - 2.5).abs() < 1e-2 && (uv[1] - 3.0).abs() < 1e-2, "{uv:?}");
+    }
+
+    #[test]
+    fn decals_that_paint_no_colour_are_left_out() {
+        let glb = asobo_triangle(r#","extensions":{"ASOBO_material_geometry_decal":{"baseColorBlendFactor":0.0}}"#);
+        assert!(load_glb(&glb).unwrap().meshes.is_empty());
+        let glb = asobo_triangle(r#","extensions":{"ASOBO_material_geometry_decal":{}}"#);
+        assert_eq!(load_glb(&glb).unwrap().meshes.len(), 1, "ordinary decals stay");
     }
 }
