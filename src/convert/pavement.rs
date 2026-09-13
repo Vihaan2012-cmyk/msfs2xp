@@ -1,12 +1,13 @@
 //! Pavement: aprons and drawn taxiway surfaces.
 //!
-//! Aprons are written one polygon per MSFS apron, in the package's own order.
-//! Merging them looked attractive, but MSFS 2024 airports supply thousands of
-//! overlapping pieces, and a boolean union of that input produces a few giant
-//! polygons (O'Hare: one with 72 000 nodes and 4 200 holes) that X-Plane
-//! silently fails to draw, leaving most of the airfield as grass. X-Plane paints
-//! overlapping pavement in file order without z-fighting, so the pieces stand
-//! as they are, layered the way the package layers them.
+//! Aprons: MSFS 2024 airports supply thousands of overlapping pieces (O'Hare:
+//! 18 623), each painted over the last. An unbounded union of them produced a
+//! few giant polygons (one with 72 000 nodes and 4 200 holes) that X-Plane
+//! silently fails to draw, leaving most of the airfield as grass. So pieces are
+//! merged only where it is safe and bounded: the same surface at the same MSFS
+//! draw priority, and only with pieces whose centre falls in the same 200 m
+//! tile. The groups are painted in MSFS priority order (a signed value, so -1
+//! goes under 0), groups of equal priority in the package's order.
 //!
 //! Drawn taxiway surfaces, which the converter builds itself from clean
 //! rectangles and discs, are still unioned into outlines (soft surfaces first,
@@ -135,9 +136,17 @@ pub fn build(ap: &Airport, plane: &Plane, opts: &Options, out: &mut AptAirport, 
         }
     }
 
-    // Aprons, one polygon each, in the package's order.
-    let mut counts: HashMap<u8, usize> = HashMap::new();
-    for a in &ap.aprons {
+    // Aprons: (priority, surface) groups, each split into tiles by piece centre.
+    const TILE: f64 = 200.0;
+    struct Group {
+        first: usize,
+        priority: i32,
+        code: u8,
+        tiles: BTreeMap<(i64, i64), Vec<Ring>>,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    let mut group_of: HashMap<(i32, u8), usize> = HashMap::new();
+    for (i, a) in ap.aprons.iter().enumerate() {
         let code = surface_code(&a.surface);
         if !a.draw || code == surface::TRANSPARENT || code == surface::WATER {
             report.dropped("decals, invisible and water aprons", 1);
@@ -148,11 +157,44 @@ pub fn build(ap: &Airport, plane: &Plane, opts: &Options, out: &mut AptAirport, 
             report.dropped("degenerate aprons", 1);
             continue;
         }
-        let n = counts.entry(code).or_default();
-        *n += 1;
-        let name = format!("{} {}", surface_name(code), n);
-        push_shape(out, plane, code, name, Shape { outer: ring, holes: vec![] });
-        report.converted("apron polygons", 1);
+        // MSFS stores the priority as a u32 holding a signed value.
+        let priority = a.priority as i32;
+        let g = *group_of.entry((priority, code)).or_insert_with(|| {
+            groups.push(Group {
+                first: i,
+                priority,
+                code,
+                tiles: BTreeMap::new(),
+            });
+            groups.len() - 1
+        });
+        let n = ring.len() as f64;
+        let (cx, cy) = ring.iter().fold((0.0, 0.0), |acc, p| (acc.0 + p.0 / n, acc.1 + p.1 / n));
+        let tile = ((cx / TILE).floor() as i64, (cy / TILE).floor() as i64);
+        groups[g].tiles.entry(tile).or_default().push(ring);
+        report.converted("apron pieces", 1);
+    }
+    groups.sort_by_key(|g| (g.priority, g.first));
+    let mut counts: HashMap<u8, usize> = HashMap::new();
+    for g in groups {
+        let name = surface_name(g.code);
+        for (_, rings) in g.tiles {
+            let pieces = |rings: Vec<Ring>| -> Vec<Shape> { rings.into_iter().map(|outer| Shape { outer, holes: vec![] }).collect() };
+            let shapes = if opts.union && rings.len() > 1 {
+                poly::union(rings.clone()).unwrap_or_else(|e| {
+                    report.warn(format!("{name} apron union failed ({e}); writing pieces"));
+                    pieces(rings)
+                })
+            } else {
+                pieces(rings)
+            };
+            for shape in shapes {
+                let n = counts.entry(g.code).or_default();
+                *n += 1;
+                push_shape(out, plane, g.code, format!("{name} {n}"), shape);
+                report.converted("apron polygons", 1);
+            }
+        }
     }
 }
 
@@ -189,6 +231,42 @@ mod tests {
     }
 
     #[test]
+    fn same_surface_aprons_merge_in_priority_order() {
+        let mut first = square(25.250, 55.360, 0.001, Surface::Asphalt);
+        first.priority = 5;
+        let mut below = square(25.2505, 55.3605, 0.001, Surface::Concrete);
+        below.priority = u32::MAX; // -1: painted under priority 0 and up
+        let mut overlap = square(25.2505, 55.3605, 0.001, Surface::Asphalt);
+        overlap.priority = 5;
+        let ap = Airport {
+            datum: LatLon::new(25.25, 55.36),
+            aprons: vec![first, below, overlap],
+            ..Default::default()
+        };
+        let (out, report) = run(&ap, true);
+        assert_eq!(out.pavements.len(), 2, "the two asphalt pieces merge");
+        assert_eq!(out.pavements[0].surface, surface::CONCRETE, "priority -1 goes first");
+        assert_eq!(out.pavements[1].surface, surface::ASPHALT);
+        assert_eq!(report.converted.get("apron pieces"), Some(&3));
+        let (raw, _) = run(&ap, false);
+        assert_eq!(raw.pavements.len(), 3, "without union every piece stands");
+    }
+
+    #[test]
+    fn distant_pieces_are_not_merged_across_tiles() {
+        let ap = Airport {
+            datum: LatLon::new(25.25, 55.36),
+            aprons: vec![
+                square(25.250, 55.360, 0.0005, Surface::Asphalt),
+                square(25.260, 55.370, 0.0005, Surface::Asphalt),
+            ],
+            ..Default::default()
+        };
+        let (out, _) = run(&ap, true);
+        assert_eq!(out.pavements.len(), 2);
+    }
+
+    #[test]
     fn aprons_are_written_one_for_one_in_package_order() {
         let ap = Airport {
             datum: LatLon::new(25.25, 55.36),
@@ -200,12 +278,14 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (out, report) = run(&ap, true);
-        assert_eq!(out.pavements.len(), 4, "overlapping aprons are never merged");
+        let (out, report) = run(&ap, false);
+        assert_eq!(out.pavements.len(), 4, "without union, one polygon per apron");
         let order: Vec<u8> = out.pavements.iter().map(|p| p.surface).collect();
         assert_eq!(order, vec![surface::CONCRETE, surface::ASPHALT, surface::ASPHALT, surface::GRASS]);
         assert!(out.pavements.iter().all(|p| p.rings.len() == 1), "no holes");
         assert_eq!(report.converted.get("apron polygons"), Some(&4));
+        let (merged, _) = run(&ap, true);
+        assert_eq!(merged.pavements.len(), 3, "the overlapping asphalt pair merges");
     }
 
     #[test]
