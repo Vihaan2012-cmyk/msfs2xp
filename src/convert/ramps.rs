@@ -54,6 +54,30 @@ fn aircraft(k: ParkingKind, radius_m: f32) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
+/// Reach of X-Plane's jetway tunnels by size code, shortest and longest, in
+/// metres (the ranges Laminar's jetway facades assign to each tunnel object).
+const TUNNEL_REACH: [(f32, f32); 4] = [(11.0, 23.0), (14.0, 29.0), (17.0, 38.0), (20.0, 47.0)];
+
+/// The X-Plane tunnel whose reach best covers the MSFS jetway's, from parked
+/// to fully extended; ties go to the shorter tunnel.
+fn tunnel_size(parked: f32, longest: f32) -> u8 {
+    let (a, b) = (parked.min(longest), longest.max(parked));
+    let mut best = (0u8, -1.0f32);
+    for (i, &(lo, hi)) in TUNNEL_REACH.iter().enumerate() {
+        let overlap = (b.min(hi) - a.max(lo)).max(0.0);
+        if overlap > best.1 {
+            best = (i as u8, overlap);
+        }
+    }
+    best.0
+}
+
+/// X-Plane jetway style: 0 and 1 are the first cab design, solid and glass;
+/// 2 and 3 the second (the `#cabin` codes of Laminar's jetway facades).
+fn style_code(glass: bool, second_design: bool) -> u8 {
+    u8::from(second_design) * 2 + u8::from(glass)
+}
+
 pub fn build(ap: &Airport, _plane: &Plane, out: &mut AptAirport, report: &mut Report) {
     let mut names: HashMap<String, usize> = HashMap::new();
     for p in &ap.parkings {
@@ -88,29 +112,49 @@ pub fn build(ap: &Airport, _plane: &Plane, out: &mut AptAirport, report: &mut Re
         });
         report.converted("ramp starts", 1);
 
-        if let Some((base, _)) = p.jetway_base {
+        for j in &p.jetways {
+            let Some((base, placed_heading)) = j.base else {
+                report.dropped("jetways without a recorded position", 1);
+                continue;
+            };
             let (dist, bearing) = inverse(base, p.pos);
-            let tunnel = (dist as f32 - p.radius_m * 0.35).clamp(4.0, 35.0);
+            let (heading, parked, longest, style) = match &j.spec {
+                // The MSFS model's parked pose: its tunnel points `angle_deg`
+                // from the model's forward axis towards its left, and the
+                // placement heading turns forward to that bearing.
+                Some(s) => (
+                    placed_heading - s.angle_deg,
+                    s.rest_m,
+                    s.reach_m.1,
+                    style_code(s.glass, s.second_design),
+                ),
+                // A model that could not be measured: Asobo's template parks
+                // the tunnel along the model's left (+X), which fits 182 of
+                // O'Hare's 190 placements; if that points away from the stand,
+                // point at the stand. Parked at a typical length, able to
+                // reach the stand.
+                None => {
+                    let template = (placed_heading - 90.0).rem_euclid(360.0);
+                    let off = ((template - bearing as f32).rem_euclid(360.0) - 180.0).abs();
+                    let heading = if off >= 90.0 { template } else { bearing as f32 };
+                    (heading, 16.0, (dist as f32).max(26.0), 0)
+                }
+            };
+            let heading = heading.rem_euclid(360.0);
+            let size = tunnel_size(parked, longest);
+            let (shortest, longest) = TUNNEL_REACH[size as usize];
             out.jetways.push(Jetway {
                 lat: base.lat,
                 lon: base.lon,
-                install_heading: bearing as f32,
-                style: 0,
-                size: if p.radius_m >= 30.0 {
-                    2
-                } else if p.radius_m >= 20.0 {
-                    1
-                } else {
-                    0
-                },
-                parked_tunnel_heading: bearing as f32,
-                parked_tunnel_length: tunnel,
-                // The cab faces the aircraft's left side, where the doors are.
-                parked_cab_heading: (p.heading + 90.0).rem_euclid(360.0),
+                install_heading: heading,
+                style,
+                size,
+                parked_tunnel_heading: heading,
+                parked_tunnel_length: parked.clamp(shortest, longest),
+                // MSFS parks the cab in line with the tunnel.
+                parked_cab_heading: heading,
             });
             report.converted("jetways", 1);
-        } else if p.has_jetway {
-            report.dropped("jetways without a recorded position", 1);
         }
     }
 }
@@ -169,16 +213,57 @@ mod tests {
     }
 
     #[test]
-    fn a_placed_jetway_becomes_a_native_jetway_pointing_at_the_stand() {
+    fn a_measured_jetway_keeps_its_parked_pose() {
         let mut s = stand("B18", ParkingKind::GateHeavy, 30.0);
-        // Jetway base 40 m east of the stand.
-        s.jetway_base = Some((crate::geo::destination(s.pos, 90.0, 40.0), 0.0));
-        s.has_jetway = true;
+        s.jetways.push(StandJetway {
+            base: Some((crate::geo::destination(s.pos, 90.0, 40.0), 180.0)),
+            spec: Some(JetwaySpec {
+                rest_m: 16.5,
+                reach_m: (14.6, 32.5),
+                angle_deg: 90.0,
+                glass: true,
+                second_design: false,
+            }),
+            ..Default::default()
+        });
         let (out, _) = run(vec![s]);
         let j = &out.jetways[0];
-        assert!((j.install_heading - 270.0).abs() < 0.5, "points back west at the stand");
-        assert!(j.parked_tunnel_length > 20.0 && j.parked_tunnel_length < 35.0);
-        assert_eq!(j.size, 2);
-        assert_eq!(j.parked_cab_heading, 270.0);
+        assert_eq!(j.install_heading, 90.0, "heading 180 turns the model's +X to bearing 90");
+        assert_eq!(j.parked_tunnel_heading, 90.0);
+        assert_eq!(j.parked_cab_heading, 90.0, "cab in line with the tunnel");
+        assert_eq!(j.size, 2, "a 16.5-32.5 m reach fits the 17-38 m tunnel best");
+        assert_eq!(j.style, 1, "glass, first cab design");
+        assert_eq!(j.parked_tunnel_length, 17.0, "kept inside the tunnel's range");
+    }
+
+    #[test]
+    fn every_jetway_of_a_stand_is_written() {
+        let mut s = stand("M17", ParkingKind::GateHeavy, 35.0);
+        // Two unmeasured jetways 30 m east: placed at heading 0 the template's
+        // +X points west, at the stand; placed at heading 180 it would point
+        // away, so the stand's bearing is used instead.
+        for heading in [0.0, 180.0] {
+            s.jetways.push(StandJetway {
+                base: Some((crate::geo::destination(s.pos, 90.0, 30.0), heading)),
+                ..Default::default()
+            });
+        }
+        let (out, report) = run(vec![s]);
+        assert_eq!(out.jetways.len(), 2);
+        assert_eq!(report.converted.get("jetways"), Some(&2));
+        for j in &out.jetways {
+            assert!((j.install_heading - 270.0).abs() < 0.5, "points west, at the stand: {}", j.install_heading);
+            assert_eq!(j.size, 1);
+        }
+    }
+
+    #[test]
+    fn tunnel_sizes_follow_the_msfs_reach() {
+        assert_eq!(tunnel_size(12.3, 29.4), 1, "O'Hare's short jetway");
+        assert_eq!(tunnel_size(16.5, 32.5), 2, "O'Hare's standard jetway");
+        assert_eq!(tunnel_size(20.1, 38.6), 3, "O'Hare's second design");
+        assert_eq!(tunnel_size(8.0, 10.0), 0);
+        assert_eq!(style_code(false, false), 0);
+        assert_eq!(style_code(true, true), 3);
     }
 }

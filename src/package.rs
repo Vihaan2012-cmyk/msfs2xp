@@ -310,6 +310,15 @@ pub fn load(source: &Source, hint: Option<Variant>) -> Loaded {
         }
     }
 
+    // Jetways: each placed jetway model's parked shape, from the package.
+    let st = crate::jetways::resolve_airports(&mut loaded.airports, &source.root, &loaded.model_libraries);
+    if st.jetways > 0 {
+        loaded.notes.push(format!(
+            "jetways: {} placed, {} measured from their MSFS models",
+            st.jetways, st.measured
+        ));
+    }
+
     // Windsocks are free-standing scenery objects; attach each to the nearest
     // airport within 5 km.
     for w in windsocks {

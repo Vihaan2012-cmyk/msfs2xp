@@ -405,13 +405,44 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
         })
         .collect();
 
-    // Jetways identify their stand by number and name code together, because
-    // stand numbers repeat across piers (A12 and B12 are different stands).
-    let jetways: std::collections::HashMap<(u16, u16), Option<&crate::bgl::records::scenery::RawPlacement>> = raw
-        .jetways
-        .iter()
-        .map(|j| ((j.parking_number, j.parking_name), j.placement.as_ref()))
-        .collect();
+    // Jetways identify their stand by number, name code and suffix together:
+    // numbers repeat across piers (A12 and B12), and lettered stands share a
+    // number (C10, C10A and C10W each have their own jetway).
+    let jetway_of = |j: &crate::bgl::records::raw::RawJetway| super::StandJetway {
+        base: j
+            .placement
+            .as_ref()
+            .map(|pl| (LatLon::new(pl.lat, pl.lon), pl.heading)),
+        model: match (&j.sim_object_title, &j.placement) {
+            (Some(title), _) => super::JetwayModel::SimObject(title.clone()),
+            (None, Some(pl)) if !pl.guid.is_nil() => super::JetwayModel::Library(pl.guid),
+            _ => super::JetwayModel::Unknown,
+        },
+        spec: None,
+    };
+    let mut stand_jetways: Vec<Vec<super::StandJetway>> = vec![Vec::new(); raw.parkings.len()];
+    let mut unmatched = Vec::new();
+    for j in &raw.jetways {
+        let key = (j.parking_number, j.parking_name, j.parking_suffix);
+        match raw
+            .parkings
+            .iter()
+            .position(|p| (p.number, p.name as u16, p.suffix as u16) == key)
+        {
+            Some(i) => stand_jetways[i].push(jetway_of(j)),
+            None => unmatched.push(j),
+        }
+    }
+    // A jetway whose suffix matches no stand (older files record none) goes
+    // to a same-numbered stand, one without a jetway if there is one.
+    for j in unmatched {
+        let same: Vec<usize> = (0..raw.parkings.len())
+            .filter(|&i| (raw.parkings[i].number, raw.parkings[i].name as u16) == (j.parking_number, j.parking_name))
+            .collect();
+        if let Some(&i) = same.iter().find(|&&i| stand_jetways[i].is_empty()).or(same.first()) {
+            stand_jetways[i].push(jetway_of(j));
+        }
+    }
     let mut parkings = Vec::with_capacity(raw.parkings.len());
     for (i, p) in raw.parkings.iter().enumerate() {
         let index = raw.taxi_points.len() + i;
@@ -429,12 +460,7 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
             kind: parking_kind_from_code(p.kind),
             name: parking_display_name(p.name, p.number, p.suffix),
             airlines: p.airlines.clone(),
-            has_jetway: jetways.contains_key(&(p.number, p.name as u16)),
-            jetway_base: jetways
-                .get(&(p.number, p.name as u16))
-                .copied()
-                .flatten()
-                .map(|pl| (LatLon::new(pl.lat, pl.lon), pl.heading)),
+            jetways: std::mem::take(&mut stand_jetways[i]),
         });
     }
 
@@ -691,13 +717,40 @@ mod tests {
                 parking_number: 9,
                 parking_name: 0x0D,
                 placement: None,
+                ..Default::default()
             }],
             ..Default::default()
         };
         let ap = airport_from_raw(raw, "f.bgl", "pkg");
-        assert!(!ap.parkings[0].has_jetway, "A9 has no jetway");
-        assert!(ap.parkings[1].has_jetway, "B9 has the jetway");
-        assert!(ap.parkings[1].jetway_base.is_none());
+        assert!(ap.parkings[0].jetways.is_empty(), "A9 has no jetway");
+        assert_eq!(ap.parkings[1].jetways.len(), 1, "B9 has the jetway");
+        assert!(ap.parkings[1].jetways[0].base.is_none());
+    }
+
+    #[test]
+    fn jetways_match_the_stand_suffix() {
+        let stand = |suffix| RawParking {
+            number: 10,
+            name: 0x0E,
+            suffix,
+            ..Default::default()
+        };
+        let jetway = |suffix| RawJetway {
+            parking_number: 10,
+            parking_name: 0x0E,
+            parking_suffix: suffix,
+            ..Default::default()
+        };
+        let raw = RawAirport {
+            variant: Variant::Msfs2020,
+            // C10, C10A and C10W.
+            parkings: vec![stand(0), stand(12), stand(34)],
+            jetways: vec![jetway(34), jetway(0), jetway(12)],
+            ..Default::default()
+        };
+        let ap = airport_from_raw(raw, "f.bgl", "pkg");
+        let counts: Vec<usize> = ap.parkings.iter().map(|p| p.jetways.len()).collect();
+        assert_eq!(counts, vec![1, 1, 1], "each stand keeps its own jetway");
     }
 
     #[test]

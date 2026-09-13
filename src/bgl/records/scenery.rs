@@ -152,6 +152,25 @@ pub fn parse_sim_object(rec: &[u8]) -> Option<RawPlacement> {
     })
 }
 
+/// The title a SimObject placement names ("KORD Jetway M24"): after the
+/// scale, a u16 length, four bytes and the text. The scale sits at 0x2C, or
+/// 28 bytes later in the layout with a precise position (Dubai's jetways).
+pub fn sim_object_title(rec: &[u8]) -> Option<String> {
+    if rec.len() < 0x36 || u16_at(rec, 0) != SO_SIM_OBJECT {
+        return None;
+    }
+    [0x2Cusize, 0x2C + 28].into_iter().find_map(|scale_at| {
+        let scale = f32::from_le_bytes(rec.get(scale_at..scale_at + 4)?.try_into().ok()?);
+        if !(scale.is_finite() && scale > 0.001 && scale < 1000.0) {
+            return None;
+        }
+        let len = u16_at(rec.get(..scale_at + 6)?, scale_at + 4) as usize;
+        let text = rec.get(scale_at + 10..scale_at + 10 + len)?;
+        let s = std::str::from_utf8(text).ok()?.trim_end_matches('\0').trim();
+        (!s.is_empty() && s.bytes().all(|b| (0x20..0x7F).contains(&b))).then(|| s.to_string())
+    })
+}
+
 /// One placed SimProp container (MSFS 2024).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawContainerPlacement {

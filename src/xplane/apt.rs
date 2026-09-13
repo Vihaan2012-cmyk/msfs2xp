@@ -288,9 +288,9 @@ pub struct Jetway {
     pub lat: f64,
     pub lon: f64,
     pub install_heading: f32,
-    /// 0 glass, 1 solid light, 2 solid dark, 3 scaffold.
+    /// 0 and 1: first cab design, solid and glass; 2 and 3: second design.
     pub style: u8,
-    /// 0 small, 1 medium, 2 large.
+    /// Tunnel reach: 0 is 11-23 m, 1 is 14-29 m, 2 is 17-38 m, 3 is 20-47 m.
     pub size: u8,
     pub parked_tunnel_heading: f32,
     pub parked_tunnel_length: f32,

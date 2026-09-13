@@ -5,6 +5,7 @@ pub mod cli;
 pub mod convert;
 pub mod decals;
 pub mod geo;
+pub mod jetways;
 pub mod materials;
 pub mod model;
 pub mod model3d;

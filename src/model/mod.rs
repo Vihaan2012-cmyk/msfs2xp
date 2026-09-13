@@ -415,9 +415,42 @@ pub struct Parking {
     /// Display name such as `A12` or `Parking 5`.
     pub name: String,
     pub airlines: Vec<String>,
-    pub has_jetway: bool,
-    /// Where the stand's jetway model is anchored and which way it faces.
-    pub jetway_base: Option<(LatLon, f32)>,
+    /// The jetways serving this stand, as placed in the source scenery.
+    pub jetways: Vec<StandJetway>,
+}
+
+/// A jetway as MSFS places it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StandJetway {
+    /// Rotunda position and the placement heading, when the record has them.
+    pub base: Option<(LatLon, f32)>,
+    /// What was placed: a SimObject by title or a library model.
+    pub model: JetwayModel,
+    /// The model's parked shape and reach, read from the package.
+    pub spec: Option<JetwaySpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum JetwayModel {
+    #[default]
+    Unknown,
+    SimObject(String),
+    Library(crate::bgl::guid::Guid),
+}
+
+/// A jetway model's shape, from its IK chain in the rest pose.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JetwaySpec {
+    /// Rotunda to cab pivot, parked, in metres.
+    pub rest_m: f32,
+    /// Rotunda to cab pivot, fully retracted and fully extended.
+    pub reach_m: (f32, f32),
+    /// Which way the parked tunnel points: degrees from the model's forward
+    /// axis (+Z) towards its left (+X).
+    pub angle_deg: f32,
+    pub glass: bool,
+    /// The second cab design (X-Plane's jetway 2 styles).
+    pub second_design: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

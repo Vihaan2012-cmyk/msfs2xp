@@ -89,7 +89,12 @@ pub struct RawJetway {
     /// Parking name code (GATE_A and so on). Needed because stand numbers
     /// repeat across piers.
     pub parking_name: u16,
+    /// Parking suffix code (the C of A12C), in the same code as the parking
+    /// record's; 0 for none.
+    pub parking_suffix: u16,
     pub placement: Option<super::scenery::RawPlacement>,
+    /// The title of the SimObject placed, when it is placed that way.
+    pub sim_object_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

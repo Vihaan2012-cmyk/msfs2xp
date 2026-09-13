@@ -5,7 +5,7 @@ use crate::bgl::file::RecordSlice;
 use crate::bgl::reader::BglError;
 
 use super::raw::{RawCom, RawHelipad, RawJetway, RawStart};
-use super::scenery::{parse_library_object, parse_sim_object};
+use super::scenery::{parse_library_object, parse_sim_object, sim_object_title};
 
 /// Airport / navaid name record: the rest of the record is the string.
 pub fn parse_name(rec: &RecordSlice) -> Result<String, BglError> {
@@ -91,19 +91,34 @@ pub fn parse_jetway(rec: &RecordSlice) -> Result<RawJetway, BglError> {
     let mut r = rec.body();
     let parking_number = r.u16()?;
     let parking_name = r.u16().unwrap_or(0);
+    // MSFS follows with the stand's suffix code (the C of A12C), which tells
+    // apart the jetways of lettered stands sharing a number; older formats
+    // keep other data there.
+    let parking_suffix = if rec.id == super::ids::AP_MSFS_JETWAY {
+        r.u16().unwrap_or(0)
+    } else {
+        0
+    };
     // Offset 0x12 is where every sample so far puts the embedded record; scan
     // nearby in case a later build moves it.
-    let placement = std::iter::once(0x12usize)
+    let embedded = std::iter::once(0x12usize)
         .chain((0x0Ausize..0x30).step_by(2))
         .find_map(|at| {
-            rec.data
-                .get(at..)
-                .and_then(|r| parse_library_object(r).or_else(|| parse_sim_object(r)))
+            let r = rec.data.get(at..)?;
+            parse_library_object(r)
+                .map(|p| (p, None))
+                .or_else(|| parse_sim_object(r).map(|p| (p, sim_object_title(r))))
         });
+    let (placement, sim_object_title) = match embedded {
+        Some((p, title)) => (Some(p), title),
+        None => (None, None),
+    };
     Ok(RawJetway {
         parking_number,
         parking_name,
+        parking_suffix,
         placement,
+        sim_object_title,
     })
 }
 
@@ -247,10 +262,95 @@ mod tests {
             data: &bytes,
         };
         let j = parse_jetway(&rec).unwrap();
-        assert_eq!((j.parking_number, j.parking_name), (24, 0x18));
+        assert_eq!((j.parking_number, j.parking_name, j.parking_suffix), (24, 0x18, 0));
+        assert!(j.sim_object_title.is_none(), "no title length recorded");
         let p = j.placement.expect("SimObject placement");
         assert!((p.lon + 87.8867).abs() < 1e-6);
         assert!((p.heading - 242.58).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_sim_object_jetway_keeps_its_suffix_and_title() {
+        // O'Hare: stand C10W (suffix code 34) served by "KORD Jetway M24".
+        let title = b"KORD Jetway M24";
+        let mut sim = Bytes::new()
+            .u16(0x001D)
+            .u16(0)
+            .pos2(41.9739, -87.8867)
+            .i32(0)
+            .u16(1)
+            .u16(0)
+            .u16(0xFFFF)
+            .u16(0xAC81)
+            .zeros(0x2C - 0x18)
+            .f32(1.0)
+            .u16(title.len() as u16)
+            .zeros(4)
+            .raw(title)
+            .zeros(5)
+            .done();
+        let n = sim.len() as u16;
+        sim[2..4].copy_from_slice(&n.to_le_bytes());
+        let body = Bytes::new()
+            .u16(10)
+            .u16(0x0E)
+            .u16(34)
+            .u16(0)
+            .u32(sim.len() as u32)
+            .raw(&sim)
+            .done();
+        let bytes = record(AP_MSFS_JETWAY, &body);
+        let rec = RecordSlice {
+            id: AP_MSFS_JETWAY,
+            offset: 0,
+            data: &bytes,
+        };
+        let j = parse_jetway(&rec).unwrap();
+        assert_eq!((j.parking_number, j.parking_name, j.parking_suffix), (10, 0x0E, 34));
+        assert_eq!(j.sim_object_title.as_deref(), Some("KORD Jetway M24"));
+        assert!((j.placement.unwrap().heading - 242.58).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_precise_sim_object_jetway_keeps_its_title() {
+        // Dubai: the layout with a precise position puts the title 28 bytes on.
+        let title = b"OMDB_Jetway_01";
+        let mut sim = Bytes::new()
+            .u16(0x001D)
+            .u16(0)
+            .pos2(25.25, 55.36)
+            .i32(0)
+            .u16(1)
+            .u16(0)
+            .u16(0xFFFF)
+            .u16(0x504A)
+            .zeros(0x2C - 0x18)
+            .raw(&[0x40; 28]) // precise latitude, longitude and heading
+            .f32(1.0)
+            .u16(title.len() as u16)
+            .zeros(4)
+            .raw(title)
+            .zeros(3)
+            .done();
+        let n = sim.len() as u16;
+        sim[2..4].copy_from_slice(&n.to_le_bytes());
+        let body = Bytes::new()
+            .u16(51)
+            .u16(0x0E)
+            .u16(0x17)
+            .u16(0)
+            .u32(sim.len() as u32)
+            .raw(&sim)
+            .done();
+        let bytes = record(AP_MSFS_JETWAY, &body);
+        let rec = RecordSlice {
+            id: AP_MSFS_JETWAY,
+            offset: 0,
+            data: &bytes,
+        };
+        let j = parse_jetway(&rec).unwrap();
+        assert_eq!(j.sim_object_title.as_deref(), Some("OMDB_Jetway_01"));
+        assert_eq!(j.parking_suffix, 0x17);
     }
 
     #[test]

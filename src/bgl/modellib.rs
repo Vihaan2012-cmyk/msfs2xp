@@ -311,6 +311,12 @@ impl ModelLibrary {
         Ok(info)
     }
 
+    /// The model's ModelInfo XML, when it has one.
+    pub fn xml(&self, guid: &Guid) -> Result<Option<String>, ModelLibError> {
+        let blob = self.read_blob(self.entry(guid)?)?;
+        Ok(parse_model_blob(&blob)?.xml.map(str::to_string))
+    }
+
     /// The GLB bytes of one LOD, 0 being the most detailed.
     pub fn load_lod(&self, guid: &Guid, lod: usize) -> Result<Vec<u8>, ModelLibError> {
         let blob = self.read_blob(self.entry(guid)?)?;
