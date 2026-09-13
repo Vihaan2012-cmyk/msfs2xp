@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 use crate::bgl::guid::Guid;
 use crate::bgl::modellib::{ModelCatalog, ModelLibrary};
 use crate::bgl::records::scenery::RawPlacement;
-use crate::model3d::{load_glb, split_by_texture, write_obj8, ObjOptions};
+use crate::model3d::{load_glb, split_by_texture, write_obj8_lods, LodPart, ObjOptions};
 use crate::package::Loaded;
 use crate::texture;
 use crate::decals::{self, DecalKind};
@@ -119,6 +119,24 @@ type VariantKey = (Guid, i32, i32);
 type ModelOutcome = Result<(Vec<String>, usize), String>;
 
 /// Delete `.dsf` tiles left by an earlier run (apt.dat is kept).
+/// Draw distances in metres for a model: full detail out to the first, the
+/// coarse level out to the second, nothing beyond. Scaled to the model's size
+/// the way MSFS picks levels by screen size: 400 radii away a model spans a
+/// few pixels, so props fade out while large buildings (50 m and up) never do.
+fn draw_distances(model: &crate::model3d::glb::Model, scale: f32) -> (f32, f32) {
+    let radius = model.bounds().map_or(1.0, |(lo, hi)| {
+        let diagonal: f32 = (0..3).map(|k| (hi[k] - lo[k]).powi(2)).sum::<f32>().sqrt();
+        diagonal / 2.0 * if scale > 0.0 { scale } else { 1.0 }
+    });
+    let far = if radius >= 50.0 {
+        f32::INFINITY
+    } else {
+        (radius * 400.0).clamp(300.0, 20_000.0).round()
+    };
+    let near = (radius * 40.0).clamp(30.0, far.min(100_000.0) / 2.0).round();
+    (near, far)
+}
+
 fn remove_dsf_tiles(nav: &Path) -> std::io::Result<()> {
     if !nav.is_dir() {
         return Ok(());
@@ -295,6 +313,21 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                     }
                     lod += 1;
                 };
+                // A coarser MSFS level for distant views: the first with at most a
+                // third of the triangles (MSFS roughly halves them per level).
+                let base_tris = model.triangle_count();
+                let mut far_model = None;
+                for l in lod + 1..=last {
+                    let Some(m) = lib.load_lod(&guid, l).ok().and_then(|b| load_glb(&b).ok()) else {
+                        break;
+                    };
+                    let t = m.triangle_count();
+                    if t > 0 && (t * 3 <= base_tris || (l == last && t * 10 <= base_tris * 7)) {
+                        far_model = Some(m);
+                        break;
+                    }
+                }
+                let (near_to, draw_to) = draw_distances(&model, scale);
                 let base = if info.name.is_empty() { guid.to_string() } else { info.name.clone() };
                 let mut suffix = if (scale - 1.0).abs() > 1e-3 { format!("_s{}", k.1) } else { String::new() };
                 if quarters != 0 {
@@ -302,13 +335,30 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 }
                 let offset_y = quarters as f32 / 4.0;
                 let mut files = Vec::new();
-                let mut groups = split_by_texture(&model);
-                if groups.is_empty() && !model.lights.is_empty() {
-                    groups.push((None, None, Vec::new())); // a lights-only object
+                // One object per texture pair, holding that pair's meshes from both
+                // levels of detail.
+                let near_groups = split_by_texture(&model);
+                let far_groups = far_model.as_ref().map(split_by_texture).unwrap_or_default();
+                let mut keys: Vec<(Option<String>, Option<String>)> = Vec::new();
+                for g in near_groups.iter().chain(&far_groups) {
+                    let k = (g.0.clone(), g.1.clone());
+                    if !keys.contains(&k) {
+                        keys.push(k);
+                    }
                 }
-                for (i, (tex, lit, meshes)) in groups.into_iter().enumerate() {
-                    let texture = tex.as_deref().and_then(&texture_for);
-                    let texture_lit = lit.as_deref().and_then(&texture_for);
+                if keys.is_empty() && !model.lights.is_empty() {
+                    keys.push((None, None)); // a lights-only object
+                }
+                let meshes_of = |groups: &[(Option<String>, Option<String>, Vec<usize>)], k: &(Option<String>, Option<String>)| {
+                    groups
+                        .iter()
+                        .find(|g| g.0 == k.0 && g.1 == k.1)
+                        .map(|g| g.2.clone())
+                        .unwrap_or_default()
+                };
+                for (i, key) in keys.iter().enumerate() {
+                    let texture = key.0.as_deref().and_then(&texture_for);
+                    let texture_lit = key.1.as_deref().and_then(&texture_for);
                     let options = ObjOptions {
                         texture,
                         scale,
@@ -316,7 +366,22 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                         texture_lit,
                         lights: i == 0,
                     };
-                    let text = write_obj8(&model, &meshes, &options);
+                    let mut parts = vec![LodPart {
+                        model: &model,
+                        meshes: meshes_of(&near_groups, key),
+                        near: 0.0,
+                        far: draw_to,
+                    }];
+                    if let Some(far) = &far_model {
+                        parts[0].far = near_to;
+                        parts.push(LodPart {
+                            model: far,
+                            meshes: meshes_of(&far_groups, key),
+                            near: near_to,
+                            far: draw_to,
+                        });
+                    }
+                    let text = write_obj8_lods(&parts, &options);
                     let file = format!("{}{}_{}.obj", safe(&base), suffix, i);
                     std::fs::write(objects_dir.join(&file), text).map_err(|e| e.to_string())?;
                     files.push(format!("objects/{file}"));
@@ -436,6 +501,28 @@ mod tests {
         assert_eq!(texture_stem("AC UNIT_COMP.PNG.KTX2"), "AC_UNIT_COMP");
         assert_eq!(texture_stem("plain.dds"), "plain");
         assert_eq!(texture_stem("weird"), "weird");
+    }
+
+    #[test]
+    fn draw_distance_follows_model_size() {
+        use crate::model3d::glb::{Mesh, Model, Vertex};
+        let sized = |half: f32| Model {
+            meshes: vec![Mesh {
+                vertices: [[-half, 0.0, 0.0], [half, 0.0, 0.0]]
+                    .iter()
+                    .map(|&pos| Vertex {
+                        pos,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(draw_distances(&sized(1.0), 1.0), (40.0, 400.0), "a person");
+        assert_eq!(draw_distances(&sized(0.3), 1.0), (30.0, 300.0), "small props keep a floor");
+        assert_eq!(draw_distances(&sized(1.0), 2.0), (80.0, 800.0), "scale counts");
+        assert!(draw_distances(&sized(200.0), 1.0).1.is_infinite(), "terminals never fade");
     }
 
     #[test]

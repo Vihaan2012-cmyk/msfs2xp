@@ -54,41 +54,73 @@ pub fn split_by_texture(model: &Model) -> Vec<(Option<String>, Option<String>, V
     groups.into_iter().map(|((t, l), v)| (t, l, v)).collect()
 }
 
+/// One level of detail: some meshes of a model, drawn when the viewer is
+/// between `near` and `far` metres away.
+#[derive(Debug, Clone)]
+pub struct LodPart<'a> {
+    pub model: &'a Model,
+    pub meshes: Vec<usize>,
+    pub near: f32,
+    /// Infinite means no distance limit.
+    pub far: f32,
+}
+
 /// Render the given meshes of a model as one OBJ8 file.
 pub fn write_obj8(model: &Model, meshes: &[usize], opts: &ObjOptions) -> String {
+    write_obj8_lods(
+        &[LodPart {
+            model,
+            meshes: meshes.to_vec(),
+            near: 0.0,
+            far: f32::INFINITY,
+        }],
+        opts,
+    )
+}
+
+/// Render levels of detail as one OBJ8 file. X-Plane draws only the part whose
+/// range holds the viewer's distance, and nothing beyond the last part. The
+/// lights (the first part's model's) are repeated in every part so they show
+/// whichever part is drawn.
+pub fn write_obj8_lods(parts: &[LodPart], opts: &ObjOptions) -> String {
     let scale = if opts.scale.is_finite() && opts.scale > 0.0 {
         opts.scale
     } else {
         1.0
     };
+    let ranged = parts.iter().any(|p| p.far.is_finite());
     let mut vt = String::new();
     let mut indices: Vec<u32> = Vec::new();
-    // (first index, count, material) per mesh, for the command section.
-    let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+    // Per part, (first index, count, material) per mesh, for the command section.
+    let mut part_spans: Vec<Vec<(usize, usize, usize)>> = Vec::new();
     let mut base = 0u32;
-    for &mi in meshes {
-        let Some(mesh) = model.meshes.get(mi) else { continue };
-        if mesh.indices.is_empty() {
-            continue;
+    for part in parts {
+        let mut spans = Vec::new();
+        for &mi in &part.meshes {
+            let Some(mesh) = part.model.meshes.get(mi) else { continue };
+            if mesh.indices.is_empty() {
+                continue;
+            }
+            for v in &mesh.vertices {
+                let _ = writeln!(
+                    vt,
+                    "VT {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.5} {:.5}",
+                    // Adding 0.0 turns -0.0 into 0.0 so output stays tidy.
+                    -v.pos[0] * scale + 0.0,
+                    v.pos[1] * scale + opts.offset_y,
+                    -v.pos[2] * scale + 0.0,
+                    -v.normal[0] + 0.0,
+                    v.normal[1],
+                    -v.normal[2] + 0.0,
+                    v.uv[0],
+                    1.0 - v.uv[1]
+                );
+            }
+            spans.push((indices.len(), mesh.indices.len(), mesh.material));
+            indices.extend(mesh.indices.iter().map(|&i| i + base));
+            base += mesh.vertices.len() as u32;
         }
-        for v in &mesh.vertices {
-            let _ = writeln!(
-                vt,
-                "VT {:.4} {:.4} {:.4} {:.4} {:.4} {:.4} {:.5} {:.5}",
-                // Adding 0.0 turns -0.0 into 0.0 so output stays tidy.
-                -v.pos[0] * scale + 0.0,
-                v.pos[1] * scale + opts.offset_y,
-                -v.pos[2] * scale + 0.0,
-                -v.normal[0] + 0.0,
-                v.normal[1],
-                -v.normal[2] + 0.0,
-                v.uv[0],
-                1.0 - v.uv[1]
-            );
-        }
-        spans.push((indices.len(), mesh.indices.len(), mesh.material));
-        indices.extend(mesh.indices.iter().map(|&i| i + base));
-        base += mesh.vertices.len() as u32;
+        part_spans.push(spans);
     }
 
     let mut out = String::with_capacity(vt.len() + indices.len() * 8 + 256);
@@ -115,62 +147,75 @@ pub fn write_obj8(model: &Model, meshes: &[usize], opts: &ObjOptions) -> String 
     }
     out.push('\n');
 
-    // Emit state changes only when they differ from the previous span.
-    let (mut cull, mut blend, mut offset): (Option<bool>, Option<String>, Option<u8>) = (None, None, None);
-    for (first, count, mat) in spans {
-        let m = model.materials.get(mat).cloned().unwrap_or_default();
-        let want_cull = !m.double_sided;
-        if cull != Some(want_cull) {
-            out.push_str(if want_cull { "ATTR_cull\n" } else { "ATTR_no_cull\n" });
-            cull = Some(want_cull);
+    for (part, spans) in parts.iter().zip(&part_spans) {
+        if ranged {
+            let far = if part.far.is_finite() { part.far } else { 100_000.0 };
+            let _ = writeln!(out, "ATTR_LOD {:.0} {:.0}", part.near, far);
         }
-        let want_blend = match m.alpha {
-            AlphaMode::Blend => "ATTR_blend".to_string(),
-            AlphaMode::Mask => format!("ATTR_no_blend {:.2}", m.alpha_cutoff.clamp(0.0, 1.0)),
-            // glTF OPAQUE ignores alpha. MSFS opaque albedo textures often hold
-            // unrelated data in alpha, and a 0.5 cutoff would punch holes in walls.
-            AlphaMode::Opaque => "ATTR_no_blend 0.00".to_string(),
-        };
-        if blend.as_deref() != Some(want_blend.as_str()) {
-            let _ = writeln!(out, "{want_blend}");
-            blend = Some(want_blend);
-        }
-        // Decals sit a hair above other geometry; polygon offset stops z-fighting.
-        let want_offset = if m.decal { 2 } else { 0 };
-        if offset != Some(want_offset) {
-            let _ = writeln!(out, "ATTR_poly_os {want_offset}");
-            offset = Some(want_offset);
-        }
-        let _ = writeln!(out, "TRIS {first} {count}");
-    }
-    if opts.lights {
-        for l in &model.lights {
-            // Same axis turn as the vertices; the height offset lifts lights too.
-            let (x, y, z) = (
-                -l.pos[0] * scale + 0.0,
-                l.pos[1] * scale + opts.offset_y,
-                -l.pos[2] * scale + 0.0,
-            );
-            let (dx, dy, dz) = (-l.dir[0] + 0.0, l.dir[1] + 0.0, -l.dir[2] + 0.0);
-            // X-Plane's WIDTH is the cosine of half the cone (Laminar's 120 degree
-            // ramp floods use 0.5).
-            let width = ((l.cone_deg.clamp(0.0, 360.0) as f64) / 2.0).to_radians().cos().max(0.0);
-            let [r, g, b] = l.color;
-            if l.spill && !l.flashing {
-                let _ = writeln!(
-                    out,
-                    "LIGHT_PARAM spot_params_sp_pm {x:.3} {y:.3} {z:.3} {r:.3} {g:.3} {b:.3} 1 {:.0}cd {dx:.4} {dy:.4} {dz:.4} {width:.4}",
-                    l.intensity.max(1.0)
-                );
+        // Emit state changes only when they differ from the previous span;
+        // each level of detail starts afresh.
+        let (mut cull, mut blend, mut offset): (Option<bool>, Option<String>, Option<u8>) = (None, None, None);
+        for &(first, count, mat) in spans {
+            let m = part.model.materials.get(mat).cloned().unwrap_or_default();
+            let want_cull = !m.double_sided;
+            if cull != Some(want_cull) {
+                out.push_str(if want_cull { "ATTR_cull\n" } else { "ATTR_no_cull\n" });
+                cull = Some(want_cull);
             }
-            let _ = writeln!(
-                out,
-                "LIGHT_PARAM spot_params_bb_pm {x:.3} {y:.3} {z:.3} {r:.3} {g:.3} {b:.3} {:.0}cd {dx:.4} {dy:.4} {dz:.4} {width:.4}",
-                (l.intensity / 6.0).max(100.0)
-            );
+            let want_blend = match m.alpha {
+                AlphaMode::Blend => "ATTR_blend".to_string(),
+                AlphaMode::Mask => format!("ATTR_no_blend {:.2}", m.alpha_cutoff.clamp(0.0, 1.0)),
+                // glTF OPAQUE ignores alpha. MSFS opaque albedo textures often hold
+                // unrelated data in alpha, and a 0.5 cutoff would punch holes in walls.
+                AlphaMode::Opaque => "ATTR_no_blend 0.00".to_string(),
+            };
+            if blend.as_deref() != Some(want_blend.as_str()) {
+                let _ = writeln!(out, "{want_blend}");
+                blend = Some(want_blend);
+            }
+            // Decals sit a hair above other geometry; polygon offset stops z-fighting.
+            let want_offset = if m.decal { 2 } else { 0 };
+            if offset != Some(want_offset) {
+                let _ = writeln!(out, "ATTR_poly_os {want_offset}");
+                offset = Some(want_offset);
+            }
+            let _ = writeln!(out, "TRIS {first} {count}");
+        }
+        if opts.lights {
+            if let Some(first) = parts.first() {
+                write_lights(&mut out, first.model, scale, opts.offset_y);
+            }
         }
     }
     out
+}
+
+fn write_lights(out: &mut String, model: &Model, scale: f32, offset_y: f32) {
+    for l in &model.lights {
+        // Same axis turn as the vertices; the height offset lifts lights too.
+        let (x, y, z) = (
+            -l.pos[0] * scale + 0.0,
+            l.pos[1] * scale + offset_y,
+            -l.pos[2] * scale + 0.0,
+        );
+        let (dx, dy, dz) = (-l.dir[0] + 0.0, l.dir[1] + 0.0, -l.dir[2] + 0.0);
+        // X-Plane's WIDTH is the cosine of half the cone (Laminar's 120 degree
+        // ramp floods use 0.5).
+        let width = ((l.cone_deg.clamp(0.0, 360.0) as f64) / 2.0).to_radians().cos().max(0.0);
+        let [r, g, b] = l.color;
+        if l.spill && !l.flashing {
+            let _ = writeln!(
+                out,
+                "LIGHT_PARAM spot_params_sp_pm {x:.3} {y:.3} {z:.3} {r:.3} {g:.3} {b:.3} 1 {:.0}cd {dx:.4} {dy:.4} {dz:.4} {width:.4}",
+                l.intensity.max(1.0)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "LIGHT_PARAM spot_params_bb_pm {x:.3} {y:.3} {z:.3} {r:.3} {g:.3} {b:.3} {:.0}cd {dx:.4} {dy:.4} {dz:.4} {width:.4}",
+            (l.intensity / 6.0).max(100.0)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +335,49 @@ mod tests {
         assert_eq!(groups.len(), 2, "same base texture, different night texture");
         assert!(groups.iter().any(|g| g.1.as_deref() == Some("a.dds") && g.2 == vec![1]));
         assert!(groups.iter().any(|g| g.1.is_none() && g.2 == vec![0]));
+    }
+
+    #[test]
+    fn levels_of_detail_become_distance_ranges() {
+        let mut near = model(2, Material::default());
+        near.lights.push(LightPoint {
+            pos: [0.0, 10.0, 0.0],
+            dir: [0.0, -1.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            intensity: 600.0,
+            cone_deg: 120.0,
+            spill: true,
+            flashing: false,
+        });
+        let far = model(1, Material::default());
+        let s = write_obj8_lods(
+            &[
+                LodPart {
+                    model: &near,
+                    meshes: vec![0],
+                    near: 0.0,
+                    far: 40.0,
+                },
+                LodPart {
+                    model: &far,
+                    meshes: vec![0],
+                    near: 40.0,
+                    far: 400.0,
+                },
+            ],
+            &ObjOptions {
+                lights: true,
+                ..Default::default()
+            },
+        );
+        assert!(s.contains("POINT_COUNTS 9 0 0 9"), "{s}");
+        let near_at = s.find("ATTR_LOD 0 40\n").expect("near range");
+        let far_at = s.find("ATTR_LOD 40 400\n").expect("far range");
+        let near_tris = s.find("TRIS 0 6\n").expect("near triangles");
+        let far_tris = s.find("TRIS 6 3\n").expect("far triangles");
+        assert!(near_at < near_tris && near_tris < far_at && far_at < far_tris, "{s}");
+        assert_eq!(s.matches("spot_params_bb_pm").count(), 2, "lights repeat per level");
+        assert!(!write_obj8(&near, &[0], &ObjOptions::default()).contains("ATTR_LOD"));
     }
 
     #[test]
