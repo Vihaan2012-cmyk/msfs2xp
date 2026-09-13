@@ -42,6 +42,10 @@ pub struct ObjectsReport {
     pub missing_models: Vec<(String, usize)>,
     pub failed_models: Vec<String>,
     pub missing_textures: Vec<String>,
+    /// X-Plane library objects standing in for models not on this PC, by kind.
+    pub stand_ins: BTreeMap<String, usize>,
+    /// How each missing model placed 8 times or more was judged.
+    pub stand_in_models: Vec<crate::standins::Verdict>,
     /// Textured apron markings draped over the pavement.
     pub decals: usize,
     pub missing_decal_textures: Vec<String>,
@@ -489,6 +493,29 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 });
             }
         }
+    }
+
+    // Stand-ins from X-Plane's library for models the package names but this
+    // PC does not have (MSFS 2024 streams its stock objects).
+    let missing_placements: Vec<&RawPlacement> =
+        loaded.placements.iter().filter(|p| catalog.find(&p.guid).is_none()).collect();
+    let aprons: Vec<&crate::model::Apron> = loaded.airports.iter().flat_map(|a| &a.aprons).collect();
+    let hot = loaded.airports.first().is_some_and(|a| a.datum.lat.abs() < 30.0);
+    let mut library_object: HashMap<&'static str, usize> = HashMap::new();
+    let (stand_ins, verdicts) = crate::standins::stand_ins(&missing_placements, &aprons, hot, &height_of);
+    report.stand_in_models = verdicts;
+    for s in stand_ins {
+        let object = *library_object.entry(s.path).or_insert_with(|| {
+            object_paths.push(s.path.to_string());
+            object_paths.len() - 1
+        });
+        placements.push(Placement {
+            lat: s.lat,
+            lon: s.lon,
+            heading: s.heading,
+            object,
+        });
+        *report.stand_ins.entry(s.kind.label().to_string()).or_default() += 1;
     }
 
     // Decals: convert each texture once, write one .pol per texture, placement

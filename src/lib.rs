@@ -12,6 +12,7 @@ pub mod model3d;
 pub mod objects;
 pub mod package;
 pub mod pipeline;
+pub mod standins;
 pub mod texture;
 pub mod xplane;
 

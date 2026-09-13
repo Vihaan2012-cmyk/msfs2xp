@@ -267,6 +267,14 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                                 r.failed_models.len()
                             );
                         }
+                        if !r.stand_ins.is_empty() {
+                            let total: usize = r.stand_ins.values().sum();
+                            let kinds: Vec<String> = r.stand_ins.iter().map(|(k, n)| format!("{n} {k}")).collect();
+                            println!(
+                                "  stand-ins: {total} X-Plane library objects for models not on this PC ({})",
+                                kinds.join(", ")
+                            );
+                        }
                         if r.decals > 0 || !r.missing_decal_textures.is_empty() {
                             println!(
                                 "  decals: {} textured markings draped over the pavement ({} decal textures missing)",
