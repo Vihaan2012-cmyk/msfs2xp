@@ -55,8 +55,8 @@ pub struct ObjectOptions {
     pub lod: usize,
     /// Step down to coarser LODs until a model has at most this many triangles.
     pub max_triangles: usize,
-    /// Largest texture side, for buildings; vehicles get half, people and small
-    /// props a quarter.
+    /// Largest texture side, for the biggest buildings; smaller models get less
+    /// (see `texture_cap`).
     pub max_texture: u32,
 }
 
@@ -156,17 +156,21 @@ fn triangle_budget(radius: f32, max: usize) -> usize {
     ((8000.0 * radius.max(0.1).powf(1.5)) as usize).clamp(3000.min(max), max)
 }
 
-/// The largest texture side for a model of this radius. Props a few metres
-/// across never cover enough of the screen to use more.
+/// The largest texture side for a model of this radius: the full size for
+/// terminals (60 m and up), half for hangars, piers and towers, a quarter for
+/// vehicles and an eighth for people and small props, which never cover
+/// enough of the screen to use more.
 fn texture_cap(radius: f32, max: u32) -> u32 {
-    let floor = 256.min(max);
-    if radius < 3.0 {
-        (max / 4).max(floor)
-    } else if radius < 15.0 {
-        (max / 2).max(floor)
-    } else {
+    let cap = if radius >= 60.0 {
         max
-    }
+    } else if radius >= 15.0 {
+        max / 2
+    } else if radius >= 3.0 {
+        max / 4
+    } else {
+        max / 8
+    };
+    cap.max(256.min(max))
 }
 
 fn remove_dsf_tiles(nav: &Path) -> std::io::Result<()> {
@@ -400,7 +404,9 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 };
                 for (i, key) in keys.iter().enumerate() {
                     let texture = key.0.as_deref().and_then(|t| texture_for(t, radius));
-                    let texture_lit = key.1.as_deref().and_then(|t| texture_for(t, radius));
+                    // Night glow needs less detail than the day texture: one tier
+                    // lower, unless the same image is also the day texture.
+                    let texture_lit = key.1.as_deref().and_then(|t| texture_for(t, radius / 4.0));
                     let options = ObjOptions {
                         texture,
                         scale,
@@ -595,10 +601,11 @@ mod tests {
         assert_eq!(triangle_budget(1.0, 500_000), 8000, "a person");
         assert_eq!(triangle_budget(0.2, 500_000), 3000, "a floor for tiny props");
         assert_eq!(triangle_budget(200.0, 500_000), 500_000, "terminals keep the full budget");
-        assert_eq!(texture_cap(1.0, 2048), 512);
-        assert_eq!(texture_cap(8.0, 2048), 1024);
-        assert_eq!(texture_cap(f32::INFINITY, 2048), 2048);
-        assert_eq!(texture_cap(1.0, 512), 256);
+        assert_eq!(texture_cap(1.0, 2048), 256, "people and chairs");
+        assert_eq!(texture_cap(8.0, 2048), 512, "vehicles");
+        assert_eq!(texture_cap(30.0, 2048), 1024, "hangars and piers");
+        assert_eq!(texture_cap(f32::INFINITY, 2048), 2048, "terminals and decals");
+        assert_eq!(texture_cap(1.0, 512), 256, "never below 256");
     }
 
     #[test]

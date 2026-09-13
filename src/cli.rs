@@ -88,7 +88,7 @@ pub struct ConvertArgs {
     #[arg(long, default_value_t = 500_000)]
     pub max_tris: usize,
 
-    /// Largest texture side for buildings; vehicles get half, people and small props a quarter.
+    /// Largest texture side, for terminals; hangars get half, vehicles a quarter, people an eighth.
     #[arg(long, default_value_t = 2048)]
     pub max_texture: u32,
 }
