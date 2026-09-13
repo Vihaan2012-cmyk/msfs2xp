@@ -224,6 +224,7 @@ pub fn surface_from_tint(rgba: [u8; 4]) -> Option<Surface> {
 pub enum LineColour {
     Yellow,
     White,
+    Red,
     Unknown,
 }
 
@@ -251,6 +252,8 @@ pub fn classify_line_name(name: &str) -> LineLook {
         LineColour::Yellow
     } else if white {
         LineColour::White
+    } else if red {
+        LineColour::Red
     } else {
         LineColour::Unknown
     };
@@ -259,7 +262,7 @@ pub fn classify_line_name(name: &str) -> LineLook {
         // "Dasjed" is a real typo in a shipping iniBuilds material name.
         dashed: has_any(&name, &["dash", "dasjed", "broken"]),
         hold_short: name.contains("hold"),
-        skip: has_any(&name, &["black", "seam", "faded", "shadow", "grunge", "crack"]) || (red && !white && !yellow),
+        skip: has_any(&name, &["black", "seam", "faded", "shadow", "grunge", "crack"]),
     }
 }
 
@@ -373,7 +376,8 @@ mod tests {
         let l = classify_line(&info("INI_Lines_Dashed_White", "UNDEFINED"));
         assert_eq!((l.colour, l.dashed), (LineColour::White, true));
         assert!(classify_line(&info("INI_CenterLine_Black_Dasjed", "CONCRETE")).skip);
-        assert!(classify_line(&info("INI_Red_Lines", "PAINT")).skip);
+        let red = classify_line(&info("INI_Red_Lines", "PAINT"));
+        assert_eq!((red.colour, red.skip), (LineColour::Red, false), "X-Plane has red lines");
         assert!(!classify_line(&info("INI_Red_White", "PAINT")).skip);
         assert!(classify_line(&info("INI_Seam", "CONCRETE")).skip);
         assert_eq!(classify_line(&info("INI_Lines_WY", "PAINT")).colour, LineColour::Yellow);

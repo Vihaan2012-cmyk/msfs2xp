@@ -24,6 +24,9 @@ mod code {
     pub const WIDE_DOUBLE_BROKEN: u8 = 9;
     pub const WHITE_SOLID: u8 = 20;
     pub const WHITE_BROKEN: u8 = 22;
+    pub const RED: u8 = 30;
+    pub const RED_BROKEN: u8 = 31;
+    pub const RED_WIDE: u8 = 32;
     pub const LIGHT_CENTRE: u8 = 101;
     pub const LIGHT_EDGE: u8 = 102;
     pub const LIGHT_HOLD: u8 = 103;
@@ -44,7 +47,9 @@ pub fn painted_line_code(k: PaintedLineKind) -> Option<u8> {
         PaintedLineKind::NonMovement | PaintedLineKind::NonMovementBack => code::BOUNDARY,
         PaintedLineKind::EdgeServiceSolid | PaintedLineKind::WideWhite => code::WHITE_SOLID,
         PaintedLineKind::EdgeServiceDashed | PaintedLineKind::ServiceDashed => code::WHITE_BROKEN,
-        PaintedLineKind::WideRed | PaintedLineKind::SlimRed | PaintedLineKind::Other(_) => return None,
+        PaintedLineKind::SlimRed => code::RED,
+        PaintedLineKind::WideRed => code::RED_WIDE,
+        PaintedLineKind::Other(_) => return None,
     })
 }
 
@@ -336,6 +341,8 @@ fn line_code_for(l: &PaintedLine) -> Option<u8> {
             (LineColour::Yellow, true) => return Some(code::BOUNDARY),
             (LineColour::White, false) => return Some(code::WHITE_SOLID),
             (LineColour::White, true) => return Some(code::WHITE_BROKEN),
+            (LineColour::Red, false) => return Some(code::RED),
+            (LineColour::Red, true) => return Some(code::RED_BROKEN),
             (LineColour::Unknown, _) => {}
         }
     }
@@ -359,7 +366,8 @@ mod tests {
         assert_eq!(painted_line_code(PaintedLineKind::IlsHoldShort), Some(6));
         assert_eq!(painted_line_code(PaintedLineKind::EdgeSolid), Some(3));
         assert_eq!(painted_line_code(PaintedLineKind::ServiceDashed), Some(22));
-        assert_eq!(painted_line_code(PaintedLineKind::WideRed), None);
+        assert_eq!(painted_line_code(PaintedLineKind::WideRed), Some(32));
+        assert_eq!(painted_line_code(PaintedLineKind::SlimRed), Some(30));
     }
 
     #[test]
@@ -506,6 +514,27 @@ mod tests {
         assert_eq!(out.lines[1].nodes[0].light, 105);
         assert_eq!(out.lines[2].nodes[0].light, 0, "a second copy goes dark too");
         assert_eq!(out.lines[3].nodes[0].light, 103);
+    }
+
+    #[test]
+    fn red_lines_are_drawn_red() {
+        let line = |kind, name: Option<&str>, lon: f64| PaintedLine {
+            kind,
+            vertices: vec![LatLon::new(25.0, lon), LatLon::new(25.001, lon)],
+            material_name: name.map(str::to_string),
+            ..Default::default()
+        };
+        let ap = Airport {
+            datum: LatLon::new(25.0, 55.0),
+            painted_lines: vec![
+                line(PaintedLineKind::SlimRed, None, 55.0),
+                line(PaintedLineKind::Default, Some("INI_Red_Lines"), 55.001),
+                line(PaintedLineKind::WideRed, None, 55.002),
+            ],
+            ..Default::default()
+        };
+        let codes: Vec<u8> = run(&ap).lines.iter().map(|l| l.nodes[0].line).collect();
+        assert_eq!(codes, vec![30, 30, 32]);
     }
 
     #[test]
