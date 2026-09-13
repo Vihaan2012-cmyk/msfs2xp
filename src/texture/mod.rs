@@ -65,7 +65,11 @@ pub enum PixelFormat {
     Bc2,
     Bc3,
     Bc4,
+    /// BC4 holding signed values (-1..1).
+    Bc4s,
     Bc5,
+    /// BC5 holding signed values, as MSFS normal maps do.
+    Bc5s,
     Bc6h,
     Bc7,
     Rgba8,
@@ -75,7 +79,7 @@ impl PixelFormat {
     /// Bytes per 4x4 block, or `None` for uncompressed data.
     pub fn block_bytes(self) -> Option<usize> {
         match self {
-            PixelFormat::Bc1 | PixelFormat::Bc4 => Some(8),
+            PixelFormat::Bc1 | PixelFormat::Bc4 | PixelFormat::Bc4s => Some(8),
             PixelFormat::Rgba8 => None,
             _ => Some(16),
         }
@@ -107,8 +111,10 @@ fn vk_format(vk: u32) -> Option<PixelFormat> {
         131..=134 => PixelFormat::Bc1,
         135 | 136 => PixelFormat::Bc2,
         137 | 138 => PixelFormat::Bc3,
-        139 | 140 => PixelFormat::Bc4,
-        141 | 142 => PixelFormat::Bc5,
+        139 => PixelFormat::Bc4,
+        140 => PixelFormat::Bc4s,
+        141 => PixelFormat::Bc5,
+        142 => PixelFormat::Bc5s,
         143 | 144 => PixelFormat::Bc6h,
         145 | 146 => PixelFormat::Bc7,
         37 | 43 => PixelFormat::Rgba8,
@@ -198,7 +204,9 @@ pub fn load_dds(data: &[u8]) -> Result<TextureImage, TextureError> {
             b"DXT2" | b"DXT3" => (PixelFormat::Bc2, false),
             b"DXT4" | b"DXT5" => (PixelFormat::Bc3, false),
             b"ATI1" | b"BC4U" => (PixelFormat::Bc4, false),
+            b"BC4S" => (PixelFormat::Bc4s, false),
             b"ATI2" | b"BC5U" => (PixelFormat::Bc5, false),
+            b"BC5S" => (PixelFormat::Bc5s, false),
             b"DX10" => {
                 start = 148;
                 let dxgi = u32_at(data, 128, C)?;
@@ -206,8 +214,10 @@ pub fn load_dds(data: &[u8]) -> Result<TextureImage, TextureError> {
                     70..=72 => (PixelFormat::Bc1, false),
                     73..=75 => (PixelFormat::Bc2, false),
                     76..=78 => (PixelFormat::Bc3, false),
-                    79..=81 => (PixelFormat::Bc4, false),
-                    82..=84 => (PixelFormat::Bc5, false),
+                    79 | 80 => (PixelFormat::Bc4, false),
+                    81 => (PixelFormat::Bc4s, false),
+                    82 | 83 => (PixelFormat::Bc5, false),
+                    84 => (PixelFormat::Bc5s, false),
                     94..=96 => (PixelFormat::Bc6h, false),
                     97..=99 => (PixelFormat::Bc7, false),
                     27..=29 => (PixelFormat::Rgba8, false),
@@ -283,12 +293,49 @@ pub fn decode_rgba8(img: &TextureImage, level: usize) -> Result<Vec<u8>, Texture
     let Some(bb) = img.format.block_bytes() else {
         return Ok(data.clone());
     };
+    // One- and two-channel formats are decoded here, signed ones included.
+    let channels = match img.format {
+        PixelFormat::Bc4 => Some((1, false)),
+        PixelFormat::Bc4s => Some((1, true)),
+        PixelFormat::Bc5 => Some((2, false)),
+        PixelFormat::Bc5s => Some((2, true)),
+        _ => None,
+    };
+    if let Some((n, signed)) = channels {
+        let (bw, bh) = (w.div_ceil(4), h.div_ceil(4));
+        let mut out = vec![0u8; w * h * 4];
+        for by in 0..bh {
+            for bx in 0..bw {
+                let at = (by * bw + bx) * bb;
+                let Some(src) = data.get(at..at + bb) else {
+                    return Err(TextureError::Truncated {
+                        container: "texture level",
+                        offset: at,
+                        need: bb,
+                        len: data.len(),
+                    });
+                };
+                let r = bc4_block(&src[0..8], signed);
+                let g = if n == 2 { bc4_block(&src[8..16], signed) } else { r };
+                for py in 0..4 {
+                    for px in 0..4 {
+                        let (x, y) = (bx * 4 + px, by * 4 + py);
+                        if x < w && y < h {
+                            let (i, o) = (py * 4 + px, (y * w + x) * 4);
+                            let b = if n == 1 { r[i] } else { 0 };
+                            out[o..o + 4].copy_from_slice(&[r[i], g[i], b, 255]);
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(out);
+    }
     let decode: fn(&[u8], &mut [u32]) = match img.format {
         PixelFormat::Bc1 => texture2ddecoder::decode_bc1_block,
         PixelFormat::Bc2 => texture2ddecoder::decode_bc2_block,
         PixelFormat::Bc3 => texture2ddecoder::decode_bc3_block,
-        PixelFormat::Bc4 => texture2ddecoder::decode_bc4_block,
-        PixelFormat::Bc5 => texture2ddecoder::decode_bc5_block,
+        PixelFormat::Bc4 | PixelFormat::Bc4s | PixelFormat::Bc5 | PixelFormat::Bc5s => unreachable!("decoded above"),
         PixelFormat::Bc6h => texture2ddecoder::decode_bc6_block_unsigned,
         PixelFormat::Bc7 => texture2ddecoder::decode_bc7_block,
         PixelFormat::Rgba8 => unreachable!("handled above"),
@@ -322,6 +369,43 @@ pub fn decode_rgba8(img: &TextureImage, level: usize) -> Result<Vec<u8>, Texture
         }
     }
     Ok(out)
+}
+
+/// Decode one BC4 block (one channel) to 16 values. Signed data is mapped so
+/// that -1 is 0 and +1 is 255.
+fn bc4_block(b: &[u8], signed: bool) -> [u8; 16] {
+    let raw = |x: u8| if signed { x as i8 as i16 } else { x as i16 };
+    let unit = |x: u8| {
+        if signed {
+            (x as i8 as f32 / 127.0).max(-1.0)
+        } else {
+            x as f32 / 255.0
+        }
+    };
+    let (e0, e1) = (unit(b[0]), unit(b[1]));
+    let mut pal = [e0, e1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    if raw(b[0]) > raw(b[1]) {
+        for i in 1..7 {
+            pal[i + 1] = ((7 - i) as f32 * e0 + i as f32 * e1) / 7.0;
+        }
+    } else {
+        for i in 1..5 {
+            pal[i + 1] = ((5 - i) as f32 * e0 + i as f32 * e1) / 5.0;
+        }
+        pal[6] = if signed { -1.0 } else { 0.0 };
+        pal[7] = 1.0;
+    }
+    let mut bits = 0u64;
+    for (i, &x) in b[2..8].iter().enumerate() {
+        bits |= (x as u64) << (8 * i);
+    }
+    let mut out = [0u8; 16];
+    for (p, o) in out.iter_mut().enumerate() {
+        let v = pal[((bits >> (3 * p)) & 7) as usize];
+        let v = if signed { v * 0.5 + 0.5 } else { v };
+        *o = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    out
 }
 
 /// Flip the 4x4 pixel rows of a 64-bit BC1-style colour block.
@@ -530,6 +614,78 @@ fn png_within(rgba: Vec<u8>, w: u32, h: u32, max_side: u32) -> Result<Converted,
     })
 }
 
+/// Shrink RGBA8 pixels to fit `max_side`, or to exactly `size` when given.
+fn shrink(rgba: Vec<u8>, w: u32, h: u32, max_side: u32, size: Option<(u32, u32)>) -> (u32, u32, Vec<u8>) {
+    let target = size.unwrap_or_else(|| {
+        if w.max(h) <= max_side {
+            (w, h)
+        } else {
+            let k = max_side as f64 / w.max(h) as f64;
+            (((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1))
+        }
+    });
+    if target == (w, h) {
+        return (w, h, rgba);
+    }
+    match image::RgbaImage::from_raw(w, h, rgba) {
+        Some(img) => {
+            let out = image::imageops::resize(&img, target.0, target.1, image::imageops::FilterType::Triangle);
+            (target.0, target.1, out.into_raw())
+        }
+        None => (target.0, target.1, vec![0; (target.0 * target.1 * 4) as usize]),
+    }
+}
+
+/// Decode any texture to RGBA8, top row first, at most `max_side` on its
+/// longer side (from a smaller mip level where there is one).
+pub fn decode_within(data: &[u8], max_side: u32) -> Result<(u32, u32, Vec<u8>), TextureError> {
+    if detect(data) == SourceFormat::Png {
+        let img = image::load_from_memory_with_format(data, image::ImageFormat::Png)
+            .map_err(|e| TextureError::Png(e.to_string()))?
+            .to_rgba8();
+        let (w, h) = img.dimensions();
+        return Ok(shrink(img.into_raw(), w, h, max_side, None));
+    }
+    let img = load(data)?;
+    let small = from_level(&img, first_level_within(&img, max_side, false));
+    let rgba = decode_rgba8(&small, 0)?;
+    Ok(shrink(rgba, small.width, small.height, max_side, None))
+}
+
+/// An X-Plane normal map in its NORMAL_METALNESS layout, from an MSFS normal
+/// map and, when there is one, its occlusion/roughness/metalness texture.
+/// Red and green carry the normal; green is inverted, because MSFS packs
+/// DirectX-style normals (green pointing down the image) and X-Plane, whose
+/// images the converter stores flipped, reads green as up. Blue is the
+/// metalness and alpha the smoothness (X-Plane: white is smooth; MSFS keeps
+/// roughness in green). X-Plane wants normal maps uncompressed, as PNG.
+pub fn normal_metal_png(normal: &[u8], comp: Option<&[u8]>, max_side: u32) -> Result<Converted, TextureError> {
+    let (w, h, n) = decode_within(normal, max_side)?;
+    let comp = match comp {
+        Some(c) => {
+            let (cw, ch, c) = decode_within(c, max_side)?;
+            Some(shrink(c, cw, ch, max_side, Some((w, h))).2)
+        }
+        None => None,
+    };
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for (i, px) in out.chunks_exact_mut(4).enumerate() {
+        let (r, g) = (n[i * 4], n[i * 4 + 1]);
+        let (metal, smooth) = comp.as_ref().map_or((0, 128), |c| (c[i * 4 + 2], 255 - c[i * 4 + 1]));
+        px.copy_from_slice(&[r, 255 - g, metal, smooth]);
+    }
+    let mut bytes = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+    image::ImageEncoder::write_image(encoder, &out, w, h, image::ExtendedColorType::Rgba8)
+        .map_err(|e| TextureError::Png(e.to_string()))?;
+    Ok(Converted {
+        bytes,
+        extension: "png",
+        // Uncompressed, four bytes a pixel, plus mips.
+        vram_bytes: w as usize * h as usize * 4 * 4 / 3,
+    })
+}
+
 /// Convert any MSFS texture, keeping its longer side at most `max_side`.
 /// Block-compressed textures drop their largest mip levels, which costs
 /// nothing beyond the lower resolution; everything else is resized.
@@ -606,6 +762,41 @@ mod tests {
             out.extend_from_slice(l);
         }
         out
+    }
+
+    #[test]
+    fn signed_bc5_decodes_to_normal_map_values() {
+        // Red: endpoints +127 and -127, every pixel index 0, so +1 (255).
+        // Green: both endpoints 0, so 0 (the middle, 128).
+        let block = [0x7F, 0x81, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let img = TextureImage {
+            width: 4,
+            height: 4,
+            format: PixelFormat::Bc5s,
+            mips: vec![block.to_vec()],
+        };
+        let px = decode_rgba8(&img, 0).unwrap();
+        assert_eq!(&px[0..4], &[255, 128, 0, 255]);
+        assert!(px.chunks(4).all(|p| p == [255, 128, 0, 255]));
+        let unsigned = TextureImage {
+            format: PixelFormat::Bc5,
+            ..img
+        };
+        assert_eq!(&decode_rgba8(&unsigned, 0).unwrap()[0..2], &[127, 0]);
+    }
+
+    #[test]
+    fn normal_maps_take_the_x_plane_channel_layout() {
+        // One 4x4 level each: normal (R 255, G 128), and a COMP texture
+        // (occlusion 10, roughness 200, metalness 100).
+        let normal = ktx2(37, 4, 4, &[[255u8, 128, 0, 255].repeat(16)], 0);
+        let comp = ktx2(37, 4, 4, &[[10u8, 200, 100, 255].repeat(16)], 0);
+        let c = normal_metal_png(&normal, Some(&comp), 1024).unwrap();
+        let img = image::load_from_memory_with_format(&c.bytes, image::ImageFormat::Png).unwrap().to_rgba8();
+        assert_eq!(img.get_pixel(0, 0).0, [255, 127, 100, 55], "green inverted, metal in blue, smoothness in alpha");
+        let bare = normal_metal_png(&normal, None, 1024).unwrap();
+        let img = image::load_from_memory_with_format(&bare.bytes, image::ImageFormat::Png).unwrap().to_rgba8();
+        assert_eq!(img.get_pixel(0, 0).0, [255, 127, 0, 128]);
     }
 
     #[test]

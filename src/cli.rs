@@ -91,6 +91,15 @@ pub struct ConvertArgs {
     /// Largest texture side, for terminals; hangars get half, vehicles a quarter, people an eighth.
     #[arg(long, default_value_t = 2048)]
     pub max_texture: u32,
+
+    /// Also convert normal maps (surface detail) for buildings 15 m and larger.
+    /// Costs video memory: X-Plane keeps normal maps uncompressed.
+    #[arg(long)]
+    pub normal_maps: bool,
+
+    /// Largest normal map side with --normal-maps (they stay uncompressed in X-Plane).
+    #[arg(long, default_value_t = 512)]
+    pub normal_max: u32,
 }
 
 #[derive(clap::Args, Debug)]

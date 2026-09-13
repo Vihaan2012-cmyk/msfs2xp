@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 use crate::bgl::guid::Guid;
 use crate::bgl::modellib::{ModelCatalog, ModelLibrary};
 use crate::bgl::records::scenery::RawPlacement;
-use crate::model3d::{load_glb, split_by_texture, write_obj8_lods, LodPart, ObjOptions};
+use crate::model3d::{load_glb, split_by_texture, write_obj8_lods, LodPart, ObjOptions, TextureKey};
 use crate::package::Loaded;
 use crate::texture;
 use crate::decals::{self, DecalKind};
@@ -32,6 +32,8 @@ pub struct ObjectsReport {
     pub textures_written: usize,
     /// Roughly the video memory the written textures take.
     pub texture_vram_mb: f64,
+    /// Normal maps written (with --normal-maps).
+    pub normal_maps: usize,
     pub triangles: usize,
     /// Placements whose model was found in neither the package nor a stock
     /// library on disk (usually MSFS 2024 stock objects, which are streamed).
@@ -62,6 +64,11 @@ pub struct ObjectOptions {
     /// Largest texture side, for the biggest buildings; smaller models get less
     /// (see `texture_cap`).
     pub max_texture: u32,
+    /// Convert normal maps for models 15 m and larger.
+    pub normal_maps: bool,
+    /// Largest normal map side. X-Plane keeps normal maps uncompressed (four
+    /// bytes a pixel), so they get less than the colour textures.
+    pub normal_max: u32,
 }
 
 impl Default for ObjectOptions {
@@ -70,6 +77,8 @@ impl Default for ObjectOptions {
             lod: 0,
             max_triangles: 500_000,
             max_texture: 2048,
+            normal_maps: false,
+            normal_max: 512,
         }
     }
 }
@@ -316,7 +325,12 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     // Textures are planned while models convert and written afterwards, once
     // the largest model using each is known, because that sets its resolution.
     // Lower-case name -> (output file, source file, largest model radius).
-    type Plan = Option<(String, PathBuf, f32)>;
+    enum Source {
+        Single(PathBuf),
+        /// A normal map and its metal/roughness companion, combined.
+        NormalMetal(PathBuf, Option<PathBuf>),
+    }
+    type Plan = Option<(String, Source, f32)>;
     let planned: Mutex<HashMap<String, Plan>> = Mutex::new(HashMap::new());
     let missing: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 
@@ -332,7 +346,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         let plan = textures.get(&lower).and_then(|src| {
             let data = std::fs::read(src).ok()?;
             let ext = texture::output_extension(&data).ok()?;
-            Some((format!("{}.{}", texture_stem(name), ext), src.clone(), radius))
+            Some((format!("{}.{}", texture_stem(name), ext), Source::Single(src.clone()), radius))
         });
         if plan.is_none() {
             if let Ok(mut m) = missing.lock() {
@@ -342,6 +356,34 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         // Another thread may have planned it meanwhile; keep the larger radius.
         let mut map = planned.lock().ok()?;
         let (file, _, r) = map.entry(lower).or_insert(plan).as_mut()?;
+        *r = r.max(radius);
+        Some(format!("textures/{file}"))
+    };
+
+    // Plan a normal map (with its metal/roughness texture) the same way.
+    let normal_for = |normal: &str, metal: Option<&str>, radius: f32| -> Option<String> {
+        let key = format!("{}|{}", normal.to_ascii_lowercase(), metal.unwrap_or("").to_ascii_lowercase());
+        if let Some(entry) = planned.lock().ok()?.get_mut(&key) {
+            let (file, _, r) = entry.as_mut()?;
+            *r = r.max(radius);
+            return Some(format!("textures/{file}"));
+        }
+        let plan = textures.get(&normal.to_ascii_lowercase()).map(|src| {
+            let metal_src = metal.and_then(|m| textures.get(&m.to_ascii_lowercase()).cloned());
+            let file = format!(
+                "{}{}_nm.png",
+                texture_stem(normal),
+                metal.map(|m| format!("_{}", texture_stem(m))).unwrap_or_default()
+            );
+            (file, Source::NormalMetal(src.clone(), metal_src), radius)
+        });
+        if plan.is_none() {
+            if let Ok(mut m) = missing.lock() {
+                m.insert(normal.to_string());
+            }
+        }
+        let mut map = planned.lock().ok()?;
+        let (file, _, r) = map.entry(key).or_insert(plan).as_mut()?;
         *r = r.max(radius);
         Some(format!("textures/{file}"))
     };
@@ -402,36 +444,38 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 let mut files = Vec::new();
                 // One object per texture pair, holding that pair's meshes from both
                 // levels of detail.
-                let near_groups = split_by_texture(&model);
-                let far_groups = far_model.as_ref().map(split_by_texture).unwrap_or_default();
-                let mut keys: Vec<(Option<String>, Option<String>)> = Vec::new();
-                for g in near_groups.iter().chain(&far_groups) {
-                    let k = (g.0.clone(), g.1.clone());
-                    if !keys.contains(&k) {
-                        keys.push(k);
+                // Normal maps only for buildings: small props never show the detail.
+                let normals = opts.normal_maps && radius >= 15.0;
+                let near_groups = split_by_texture(&model, normals);
+                let far_groups = far_model.as_ref().map(|m| split_by_texture(m, normals)).unwrap_or_default();
+                let mut keys: Vec<TextureKey> = Vec::new();
+                for (k, _) in near_groups.iter().chain(&far_groups) {
+                    if !keys.contains(k) {
+                        keys.push(k.clone());
                     }
                 }
                 if keys.is_empty() && !model.lights.is_empty() {
-                    keys.push((None, None)); // a lights-only object
+                    keys.push(TextureKey::default()); // a lights-only object
                 }
-                let meshes_of = |groups: &[(Option<String>, Option<String>, Vec<usize>)], k: &(Option<String>, Option<String>)| {
-                    groups
-                        .iter()
-                        .find(|g| g.0 == k.0 && g.1 == k.1)
-                        .map(|g| g.2.clone())
-                        .unwrap_or_default()
+                let meshes_of = |groups: &[(TextureKey, Vec<usize>)], k: &TextureKey| {
+                    groups.iter().find(|g| &g.0 == k).map(|g| g.1.clone()).unwrap_or_default()
                 };
                 for (i, key) in keys.iter().enumerate() {
-                    let texture = key.0.as_deref().and_then(|t| texture_for(t, radius));
+                    let texture = key.base.as_deref().and_then(|t| texture_for(t, radius));
                     // Night glow needs less detail than the day texture: one tier
                     // lower, unless the same image is also the day texture.
-                    let texture_lit = key.1.as_deref().and_then(|t| texture_for(t, radius / 4.0));
+                    let texture_lit = key.lit.as_deref().and_then(|t| texture_for(t, radius / 4.0));
+                    let texture_normal = key
+                        .normal
+                        .as_deref()
+                        .and_then(|n| normal_for(n, key.metal_rough.as_deref(), radius));
                     let options = ObjOptions {
                         texture,
                         scale,
                         offset_y,
                         texture_lit,
                         lights: i == 0,
+                        texture_normal,
                     };
                     let mut parts = vec![LodPart {
                         model: &model,
@@ -572,13 +616,25 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         report.dsf_tiles.push(rel.display().to_string());
     }
     // Write every planned texture, sized for the largest model that uses it.
-    let plans: Vec<(String, PathBuf, f32)> = planned.into_inner().unwrap_or_default().into_values().flatten().collect();
+    let plans: Vec<(String, Source, f32)> = planned.into_inner().unwrap_or_default().into_values().flatten().collect();
     let written: Vec<Result<usize, String>> = plans
         .par_iter()
         .map(|(file, src, radius)| {
-            let data = std::fs::read(src).map_err(|e| e.to_string())?;
-            let c = texture::convert_for_xplane_capped(&data, texture_cap(*radius, opts.max_texture))
-                .map_err(|e| e.to_string())?;
+            let cap = texture_cap(*radius, opts.max_texture);
+            let c = match src {
+                Source::Single(path) => {
+                    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+                    texture::convert_for_xplane_capped(&data, cap).map_err(|e| e.to_string())?
+                }
+                // Normal maps are uncompressed in X-Plane: half the colour
+                // texture's size at most, and no more than --normal-max.
+                Source::NormalMetal(normal, metal) => {
+                    let n = std::fs::read(normal).map_err(|e| e.to_string())?;
+                    let m = metal.as_ref().and_then(|p| std::fs::read(p).ok());
+                    let side = (cap / 2).min(opts.normal_max).max(64);
+                    texture::normal_metal_png(&n, m.as_deref(), side).map_err(|e| e.to_string())?
+                }
+            };
             if !file.ends_with(c.extension) {
                 return Err(format!("came out as {}", c.extension));
             }
@@ -587,9 +643,12 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         })
         .collect();
     let mut missing = missing.into_inner().unwrap_or_default();
-    for ((file, _, _), r) in plans.iter().zip(&written) {
+    for ((file, src, _), r) in plans.iter().zip(&written) {
         match r {
             Ok(bytes) => {
+                if matches!(src, Source::NormalMetal(..)) {
+                    report.normal_maps += 1;
+                }
                 report.textures_written += 1;
                 report.texture_vram_mb += *bytes as f64 / 1e6;
             }

@@ -244,6 +244,8 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                     lod: args.lod,
                     max_triangles: args.max_tris,
                     max_texture: args.max_texture,
+                    normal_maps: args.normal_maps,
+                    normal_max: args.normal_max,
                 };
                 match crate::objects::build(&loaded, &dir, &opts) {
                     Ok(r) => {
@@ -266,6 +268,9 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                                 r.not_in_package,
                                 r.failed_models.len()
                             );
+                        }
+                        if r.normal_maps > 0 {
+                            println!("  normal maps: {} for buildings 15 m and larger", r.normal_maps);
                         }
                         if !r.stand_ins.is_empty() {
                             let total: usize = r.stand_ins.values().sum();

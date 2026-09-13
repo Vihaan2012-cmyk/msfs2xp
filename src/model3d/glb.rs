@@ -57,6 +57,9 @@ pub struct Material {
     /// Texture file names only, without the author's directory.
     pub base_color: Option<String>,
     pub normal: Option<String>,
+    /// glTF metallic-roughness texture (MSFS "COMP": occlusion, roughness,
+    /// metalness in red, green, blue).
+    pub metal_rough: Option<String>,
     pub emissive: Option<String>,
     /// Strongest emissive factor component; 0 when the material does not glow
     /// (glTF's default emissive factor is black, even with a texture).
@@ -75,6 +78,7 @@ impl Default for Material {
             name: String::new(),
             base_color: None,
             normal: None,
+            metal_rough: None,
             emissive: None,
             emissive_strength: 0.0,
             base_color_factor: [1.0; 4],
@@ -497,6 +501,7 @@ fn material(json: &Value, m: &Value) -> (Material, bool) {
         Material {
             base_color: texture_file(json, pbr["baseColorTexture"]["index"].as_u64()),
             normal: texture_file(json, m["normalTexture"]["index"].as_u64()),
+            metal_rough: texture_file(json, pbr["metallicRoughnessTexture"]["index"].as_u64()),
             emissive: texture_file(json, m["emissiveTexture"]["index"].as_u64()),
             emissive_strength: floats(&m["emissiveFactor"], 3)
                 .map(|v| v.iter().fold(0.0f64, |a, &x| a.max(x)) as f32)

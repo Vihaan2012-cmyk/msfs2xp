@@ -35,23 +35,40 @@ pub struct ObjOptions {
     pub texture_lit: Option<String>,
     /// Write the model's lights into this object (only one object per model).
     pub lights: bool,
+    /// Normal map in X-Plane's NORMAL_METALNESS layout.
+    pub texture_normal: Option<String>,
 }
 
-/// Group a model's meshes by (base texture, night texture), in a stable order.
-/// An object can carry one of each, so glowing materials get their own group
-/// and nothing else samples their night texture.
-pub fn split_by_texture(model: &Model) -> Vec<(Option<String>, Option<String>, Vec<usize>)> {
-    let mut groups: BTreeMap<(Option<String>, Option<String>), Vec<usize>> = BTreeMap::new();
+/// The textures one object carries: base, night and, when normal maps are
+/// converted, the normal map with its metal/roughness companion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TextureKey {
+    pub base: Option<String>,
+    pub lit: Option<String>,
+    pub normal: Option<String>,
+    pub metal_rough: Option<String>,
+}
+
+/// Group a model's meshes by the textures they need, in a stable order. An
+/// object can carry one of each, so glowing materials (and, with `normals`,
+/// materials with their own normal map) get their own group.
+pub fn split_by_texture(model: &Model, normals: bool) -> Vec<(TextureKey, Vec<usize>)> {
+    let mut groups: BTreeMap<TextureKey, Vec<usize>> = BTreeMap::new();
     for (i, mesh) in model.meshes.iter().enumerate() {
         if mesh.indices.is_empty() {
             continue;
         }
         let m = model.materials.get(mesh.material);
-        let tex = m.and_then(|m| m.base_color.clone());
-        let lit = m.filter(|m| m.emissive_strength > 0.0).and_then(|m| m.emissive.clone());
-        groups.entry((tex, lit)).or_default().push(i);
+        let normal = m.filter(|_| normals).and_then(|m| m.normal.clone());
+        let key = TextureKey {
+            base: m.and_then(|m| m.base_color.clone()),
+            lit: m.filter(|m| m.emissive_strength > 0.0).and_then(|m| m.emissive.clone()),
+            metal_rough: m.filter(|_| normal.is_some()).and_then(|m| m.metal_rough.clone()),
+            normal,
+        };
+        groups.entry(key).or_default().push(i);
     }
-    groups.into_iter().map(|((t, l), v)| (t, l, v)).collect()
+    groups.into_iter().collect()
 }
 
 /// One level of detail: some meshes of a model, drawn when the viewer is
@@ -130,6 +147,10 @@ pub fn write_obj8_lods(parts: &[LodPart], opts: &ObjOptions) -> String {
     }
     if let Some(lit) = &opts.texture_lit {
         let _ = writeln!(out, "TEXTURE_LIT {lit}");
+    }
+    if let Some(normal) = &opts.texture_normal {
+        let _ = writeln!(out, "TEXTURE_NORMAL {normal}");
+        out.push_str("NORMAL_METALNESS\n");
     }
     let _ = writeln!(out, "POINT_COUNTS {} 0 0 {}\n", base, indices.len());
     out.push_str(&vt);
@@ -269,6 +290,7 @@ mod tests {
                 offset_y: 5.0,
                 texture_lit: None,
                 lights: false,
+                texture_normal: None,
             },
         );
         // Model +X becomes object -X, and the height offset lifts every vertex.
@@ -303,9 +325,13 @@ mod tests {
                 offset_y: 0.0,
                 texture_lit: Some("t/a_lit.dds".into()),
                 lights: true,
+                texture_normal: Some("t/a_nm.png".into()),
             },
         );
-        assert!(s.contains("TEXTURE t/a.dds\nTEXTURE_LIT t/a_lit.dds\nPOINT_COUNTS"), "{s}");
+        assert!(
+            s.contains("TEXTURE t/a.dds\nTEXTURE_LIT t/a_lit.dds\nTEXTURE_NORMAL t/a_nm.png\nNORMAL_METALNESS\nPOINT_COUNTS"),
+            "{s}"
+        );
         assert!(
             s.contains("LIGHT_PARAM spot_params_sp_pm -1.000 10.000 -2.000 1.000 1.000 1.000 1 7500cd 0.0000 -1.0000 -1.0000 0.5000"),
             "{s}"
@@ -331,10 +357,10 @@ mod tests {
         let mut second = m.meshes[0].clone();
         second.material = 1;
         m.meshes.push(second);
-        let groups = split_by_texture(&m);
+        let groups = split_by_texture(&m, false);
         assert_eq!(groups.len(), 2, "same base texture, different night texture");
-        assert!(groups.iter().any(|g| g.1.as_deref() == Some("a.dds") && g.2 == vec![1]));
-        assert!(groups.iter().any(|g| g.1.is_none() && g.2 == vec![0]));
+        assert!(groups.iter().any(|g| g.0.lit.as_deref() == Some("a.dds") && g.1 == vec![1]));
+        assert!(groups.iter().any(|g| g.0.lit.is_none() && g.1 == vec![0]));
     }
 
     #[test]
@@ -398,6 +424,7 @@ mod tests {
                 offset_y: 0.0,
                 texture_lit: None,
                 lights: false,
+                texture_normal: None,
             },
         );
         assert!(s.starts_with("I\n800\nOBJ\n\nTEXTURE textures/a.dds\nPOINT_COUNTS 3 0 0 3\n"));
@@ -446,18 +473,25 @@ mod tests {
         let mut second = m.meshes[0].clone();
         second.material = 1;
         m.meshes.push(second);
-        let groups = split_by_texture(&m);
+        let groups = split_by_texture(&m, false);
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0.as_deref(), Some("a.dds"));
-        assert_eq!(groups[0].2, vec![1]);
+        assert_eq!(groups[0].0.base.as_deref(), Some("a.dds"));
+        assert_eq!(groups[0].1, vec![1]);
+        // With normal maps on, a different normal map splits the same base texture.
+        m.materials[1].normal = Some("n.dds".into());
+        m.materials[0].base_color = Some("a.dds".into());
+        let groups = split_by_texture(&m, true);
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().any(|g| g.0.normal.as_deref() == Some("n.dds")));
+        assert_eq!(split_by_texture(&m, false).len(), 1, "without normal maps they share an object");
     }
 
     #[test]
     fn a_real_glb_round_trips_to_obj8() {
         let glb = crate::model3d::glb::tests::asobo_triangle("");
         let model = crate::model3d::load_glb(&glb).unwrap();
-        let groups = split_by_texture(&model);
-        let s = write_obj8(&model, &groups[0].2, &ObjOptions::default());
+        let groups = split_by_texture(&model, false);
+        let s = write_obj8(&model, &groups[0].1, &ObjOptions::default());
         assert!(s.contains("POINT_COUNTS 3 0 0 3"));
         assert!(s.contains("ATTR_no_cull"));
     }
