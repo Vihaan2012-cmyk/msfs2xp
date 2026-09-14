@@ -252,7 +252,7 @@ fn build(a: &mut App) -> Result<(), nwg::NwgError> {
         .parent(t)
         .build(&mut a.airports)?;
     label("Output folder:", (10, 296), (110, 24), t, &mut a.out_label)?;
-    nwg::TextInput::builder().position((125, 295)).size((475, 26)).parent(t).build(&mut a.out_path)?;
+    nwg::TextInput::builder().position((125, 292)).size((475, 32)).parent(t).build(&mut a.out_path)?;
     button("Browse\u{2026}", (610, 294), (190, 28), t, &mut a.out_browse)?;
     check("Buildings and objects", (10, 332), t, &mut a.opt_objects)?;
     check("Normal maps (surface detail)", (260, 332), t, &mut a.opt_normals)?;
@@ -278,7 +278,7 @@ fn build(a: &mut App) -> Result<(), nwg::NwgError> {
     button("Open converted pack\u{2026}", (10, 10), (190, 28), t, &mut a.open_pack)?;
     label("No pack open. Pick a converted airport folder (the one holding \u{201c}objects\u{201d}).", (210, 13), (750, 24), t, &mut a.pack_label)?;
     label("Search:", (10, 48), (60, 24), t, &mut a.filter_label)?;
-    nwg::TextInput::builder().position((75, 47)).size((300, 26)).parent(t).build(&mut a.filter)?;
+    nwg::TextInput::builder().position((75, 45)).size((300, 32)).parent(t).build(&mut a.filter)?;
     nwg::ListView::builder()
         .position((10, 80))
         .size((560, 615))
@@ -318,21 +318,21 @@ fn build(a: &mut App) -> Result<(), nwg::NwgError> {
 
     // Validate, Preview, Inspect
     let t = &a.tab_validate;
-    nwg::TextInput::builder().position((10, 12)).size((740, 26)).parent(t).build(&mut a.val_path)?;
-    button("Browse\u{2026}", (760, 11), (100, 28), t, &mut a.val_browse)?;
-    button("Validate", (870, 11), (100, 28), t, &mut a.val_run)?;
+    nwg::TextInput::builder().position((10, 10)).size((740, 32)).parent(t).build(&mut a.val_path)?;
+    button("Browse\u{2026}", (760, 10), (100, 32), t,&mut a.val_browse)?;
+    button("Validate", (870, 10), (100, 32), t, &mut a.val_run)?;
     output_box((10, 50), (960, 645), t, &mut a.val_out)?;
     let t = &a.tab_preview;
-    nwg::TextInput::builder().position((10, 12)).size((740, 26)).parent(t).build(&mut a.pre_path)?;
-    button("Browse\u{2026}", (760, 11), (100, 28), t, &mut a.pre_browse)?;
-    button("Render map", (870, 11), (100, 28), t, &mut a.pre_run)?;
+    nwg::TextInput::builder().position((10, 10)).size((740, 32)).parent(t).build(&mut a.pre_path)?;
+    button("Browse\u{2026}", (760, 10), (100, 32), t,&mut a.pre_browse)?;
+    button("Render map", (870, 10), (100, 32), t, &mut a.pre_run)?;
     output_box((10, 50), (960, 645), t, &mut a.pre_out)?;
     let t = &a.tab_inspect;
-    nwg::TextInput::builder().position((10, 12)).size((740, 26)).parent(t).build(&mut a.ins_path)?;
-    button("Browse\u{2026}", (760, 11), (100, 28), t, &mut a.ins_browse)?;
-    button("Inspect", (870, 11), (100, 28), t, &mut a.ins_run)?;
+    nwg::TextInput::builder().position((10, 10)).size((740, 32)).parent(t).build(&mut a.ins_path)?;
+    button("Browse\u{2026}", (760, 10), (100, 32), t,&mut a.ins_browse)?;
+    button("Inspect", (870, 10), (100, 32), t, &mut a.ins_run)?;
     label("Only airport (ICAO):", (10, 49), (150, 24), t, &mut a.ins_icao_label)?;
-    nwg::TextInput::builder().position((165, 48)).size((90, 26)).parent(t).build(&mut a.ins_icao)?;
+    nwg::TextInput::builder().position((165, 46)).size((90, 32)).parent(t).build(&mut a.ins_icao)?;
     nwg::CheckBox::builder()
         .text("Hex dump unknown records")
         .position((275, 48))
