@@ -354,6 +354,42 @@ mod tests {
     }
 
     #[test]
+    fn an_msfs2020_jetway_placement_keeps_its_title() {
+        // Dubai 1.0.3: the older 0x0019 SimObject record, title two bytes
+        // after the length instead of four.
+        let title = b"OMDB_Jetway_01";
+        let mut sim = Bytes::new()
+            .u16(0x0019)
+            .u16(0)
+            .pos2(25.2486, 55.3601)
+            .i32(0)
+            .u16(1)
+            .u16(0)
+            .u16(0xFFFE)
+            .u16(0xAB3D)
+            .zeros(0x2C - 0x18)
+            .f32(1.0)
+            .u16(title.len() as u16)
+            .zeros(2)
+            .raw(title)
+            .zeros(4)
+            .done();
+        let n = sim.len() as u16;
+        sim[2..4].copy_from_slice(&n.to_le_bytes());
+        let body = Bytes::new().u16(18).u16(0x0D).u16(0x1D).u16(0).u32(sim.len() as u32).raw(&sim).done();
+        let bytes = record(AP_MSFS_JETWAY, &body);
+        let rec = RecordSlice {
+            id: AP_MSFS_JETWAY,
+            offset: 0,
+            data: &bytes,
+        };
+        let j = parse_jetway(&rec).unwrap();
+        assert_eq!(j.sim_object_title.as_deref(), Some("OMDB_Jetway_01"));
+        let p = j.placement.expect("placed");
+        assert!((p.lat - 25.2486).abs() < 1e-5 && (p.heading - 240.8).abs() < 0.1, "{p:?}");
+    }
+
+    #[test]
     fn a_legacy_jetway_has_no_placement() {
         let bytes = record(AP_JETWAY, &Bytes::new().u16(4).u16(0x0C).done());
         let rec = RecordSlice {

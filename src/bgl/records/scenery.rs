@@ -126,6 +126,9 @@ pub fn parse_library_object(rec: &[u8]) -> Option<RawPlacement> {
 
 /// Record id of a SimObject placement, which names its object by title.
 pub const SO_SIM_OBJECT: u16 = 0x001D;
+/// The older SimObject placement (MSFS 2020 SDKs, as in Dubai 1.0.3's jetways):
+/// the same head, with the title two bytes earlier.
+pub const SO_SIM_OBJECT_OLD: u16 = 0x0019;
 
 /// Parse a SimObject placement (0x001D).
 ///
@@ -133,7 +136,7 @@ pub const SO_SIM_OBJECT: u16 = 0x001D;
 /// but names a SimObject by title instead of a model by GUID, so the GUID is
 /// left nil. MSFS 2024 jetways at some airports are placed this way.
 pub fn parse_sim_object(rec: &[u8]) -> Option<RawPlacement> {
-    if rec.len() < 0x18 || u16_at(rec, 0) != SO_SIM_OBJECT {
+    if rec.len() < 0x18 || !matches!(u16_at(rec, 0), SO_SIM_OBJECT | SO_SIM_OBJECT_OLD) {
         return None;
     }
     if (u16_at(rec, 2) as usize) < 0x18 {
@@ -153,19 +156,23 @@ pub fn parse_sim_object(rec: &[u8]) -> Option<RawPlacement> {
 }
 
 /// The title a SimObject placement names ("KORD Jetway M24"): after the
-/// scale, a u16 length, four bytes and the text. The scale sits at 0x2C, or
-/// 28 bytes later in the layout with a precise position (Dubai's jetways).
+/// scale, a u16 length, four bytes (two in the older 0x0019 record) and the
+/// text. The scale sits at 0x2C, or 28 bytes later in the layout with a
+/// precise position (Dubai's 2024 jetways).
 pub fn sim_object_title(rec: &[u8]) -> Option<String> {
-    if rec.len() < 0x36 || u16_at(rec, 0) != SO_SIM_OBJECT {
-        return None;
-    }
+    let id = if rec.len() >= 0x34 { u16_at(rec, 0) } else { 0 };
+    let gap = match id {
+        SO_SIM_OBJECT => 10,
+        SO_SIM_OBJECT_OLD => 8,
+        _ => return None,
+    };
     [0x2Cusize, 0x2C + 28].into_iter().find_map(|scale_at| {
         let scale = f32::from_le_bytes(rec.get(scale_at..scale_at + 4)?.try_into().ok()?);
         if !(scale.is_finite() && scale > 0.001 && scale < 1000.0) {
             return None;
         }
         let len = u16_at(rec.get(..scale_at + 6)?, scale_at + 4) as usize;
-        let text = rec.get(scale_at + 10..scale_at + 10 + len)?;
+        let text = rec.get(scale_at + gap..scale_at + gap + len)?;
         let s = std::str::from_utf8(text).ok()?.trim_end_matches('\0').trim();
         (!s.is_empty() && s.bytes().all(|b| (0x20..0x7F).contains(&b))).then(|| s.to_string())
     })
