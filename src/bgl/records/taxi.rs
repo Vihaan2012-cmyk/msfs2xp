@@ -124,7 +124,13 @@ pub fn parse_taxi_paths(rec: &RecordSlice, warnings: &mut Vec<String>) -> Result
         let right_edge_lit = f & (1 << 7) != 0;
         let surface = r.u8()? & 0x7F;
         let width_m = r.f32()?;
+        let mut material = None;
         if msfs {
+            material = rec
+                .data
+                .get(base + 24..base + 40)
+                .and_then(crate::bgl::guid::Guid::from_slice)
+                .filter(|g| !g.is_nil());
             // weight limit, unknown, unknown, material GUID, unknown, then the end index
             if r.skip(4 + 4 + 4).is_ok() && r.skip(16).is_ok() && r.skip(6).is_ok() {
                 if let Ok(e) = r.u16() {
@@ -149,6 +155,7 @@ pub fn parse_taxi_paths(rec: &RecordSlice, warnings: &mut Vec<String>) -> Result
             right_edge_lit,
             surface,
             width_m,
+            material,
         });
     }
     Ok(out)

@@ -309,6 +309,11 @@ pub fn resolve_airport(ap: &mut Airport, catalog: &MaterialCatalog) -> ResolveSt
             stats.lines_named += 1;
         }
     }
+    for p in &mut ap.taxi_paths {
+        if let Some(info) = p.material_guid.and_then(|g| catalog.get(&g)) {
+            p.material_name = Some(info.name.clone());
+        }
+    }
     stats
 }
 

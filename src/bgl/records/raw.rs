@@ -203,6 +203,8 @@ pub struct RawTaxiPath {
     pub right_edge_lit: bool,
     pub surface: u8,
     pub width_m: f32,
+    /// MSFS: the ground material the path is painted with.
+    pub material: Option<Guid>,
 }
 
 #[derive(Debug, Clone, Default)]

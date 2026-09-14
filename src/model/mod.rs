@@ -359,6 +359,10 @@ pub struct TaxiPath {
     pub left_edge_lit: bool,
     pub right_edge: EdgeLine,
     pub right_edge_lit: bool,
+    /// MSFS ground material the path is painted with, and its name once
+    /// resolved from the material libraries.
+    pub material_guid: Option<crate::bgl::guid::Guid>,
+    pub material_name: Option<String>,
 }
 
 /// Stand category.

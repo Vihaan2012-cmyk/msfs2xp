@@ -389,10 +389,11 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
         })
         .collect();
 
-    // MSFS numbers taxi points and parking stands in one shared index space:
-    // points first in file order, then parkings. Taxi paths reference that
-    // space, so the two lists must be concatenated in exactly this order or
-    // every path connects to the wrong place.
+    // Taxi points and parking stands share one node list: points first in
+    // file order, then stands. Paths index the taxi points, except a parking
+    // path's end, which numbers its stand from zero and is shifted into this
+    // list below. Read against the whole list, it lands on a taxi point
+    // kilometres away (Dubai's stand lead-ins became one 4 km² slab).
     let mut taxi_nodes: Vec<TaxiNode> = raw
         .taxi_points
         .iter()
@@ -476,7 +477,13 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
             };
             TaxiPath {
                 start: p.start as usize,
-                end: p.end as usize,
+                // A parking path's end numbers the stand itself, from zero; the
+                // stands follow the taxi points in `taxi_nodes`.
+                end: if kind == PathKind::Parking {
+                    raw.taxi_points.len() + p.end as usize
+                } else {
+                    p.end as usize
+                },
                 kind,
                 name,
                 width_m: p.width_m,
@@ -488,6 +495,8 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
                 left_edge_lit: p.left_edge_lit,
                 right_edge: edge_from_code(p.right_edge),
                 right_edge_lit: p.right_edge_lit,
+                material_guid: p.material,
+                material_name: None,
             }
         })
         .collect();
@@ -695,6 +704,35 @@ mod tests {
         assert_eq!(ap.parkings[1].index, 4);
         assert_eq!(ap.taxi_nodes[3].kind, NodeKind::Parking);
         assert_eq!(ap.parkings[0].name, "A1");
+    }
+
+    #[test]
+    fn parking_paths_end_at_their_stand() {
+        let raw = RawAirport {
+            ident: "OMDB".into(),
+            variant: Variant::Msfs2020,
+            taxi_points: vec![RawTaxiPoint::default(); 3],
+            parkings: vec![RawParking::default(); 2],
+            taxi_paths: vec![
+                RawTaxiPath {
+                    start: 0,
+                    end: 1,
+                    kind: 3, // parking, to the second stand
+                    ..Default::default()
+                },
+                RawTaxiPath {
+                    start: 0,
+                    end: 1,
+                    kind: 1, // taxi
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let ap = airport_from_raw(raw, "f.bgl", "pkg");
+        assert_eq!(ap.taxi_paths[0].end, 4, "the second stand follows the three taxi points");
+        assert_eq!(ap.taxi_nodes[4].kind, NodeKind::Parking);
+        assert_eq!(ap.taxi_paths[1].end, 1, "other paths end at a taxi point");
     }
 
     #[test]
