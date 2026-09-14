@@ -4,7 +4,7 @@ use crate::geo::{destination, LatLon};
 use crate::model::{Airport, Runway, Side, Surface};
 use crate::xplane::apt::{self, AptAirport};
 
-use super::tables::{als_code, edge_light_code, marking_code, surface_code, vasi_code};
+use super::tables::{als_code, edge_light_code, marking_code, shaded_surface_code, surface_code, vasi_code};
 use super::Report;
 
 /// Both runway end positions, primary first.
@@ -76,7 +76,7 @@ pub fn build(ap: &Airport, out: &mut AptAirport, report: &mut Report) {
         };
         out.runways.push(apt::Runway {
             width_m: r.width_m,
-            surface: surface_code(&r.surface),
+            surface: shaded_surface_code(&r.surface, r.brightness),
             shoulder,
             smoothness: 0.25,
             centre_lights: r.centre_lights.is_on(),

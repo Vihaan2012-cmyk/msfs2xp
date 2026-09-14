@@ -52,6 +52,8 @@ pub struct ObjectsReport {
     pub stand_ins: BTreeMap<String, usize>,
     /// How each missing model placed 8 times or more was judged.
     pub stand_in_models: Vec<crate::standins::Verdict>,
+    /// Pavement polygons draped with their MSFS material texture.
+    pub ground_polygons: usize,
     /// Textured apron markings draped over the pavement.
     pub decals: usize,
     pub missing_decal_textures: Vec<String>,
@@ -75,6 +77,10 @@ pub struct ObjectOptions {
     pub normal_max: u32,
     /// Texture fixes file; by default the pack's own msfs2xp-fixes.json.
     pub fixes: Option<PathBuf>,
+    /// Drape MSFS's textured markings (stand numbers, arrows, hatching) over
+    /// the pavement. Off when the ground comes from an X-Plane layout, which
+    /// paints its own.
+    pub decals: bool,
 }
 
 impl Default for ObjectOptions {
@@ -86,6 +92,7 @@ impl Default for ObjectOptions {
             normal_maps: false,
             normal_max: 512,
             fixes: None,
+            decals: true,
         }
     }
 }
@@ -225,8 +232,12 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
         placements: loaded.placements.len(),
         ..Default::default()
     };
-    let decal_list: Vec<decals::DecalPolygon> =
-        loaded.airports.iter().flat_map(|a| decals::airport_decals(&a.aprons)).collect();
+    // The pavement textures first, then the markings over them.
+    let decal_list: Vec<decals::DecalPolygon> = loaded
+        .airports
+        .iter()
+        .flat_map(|a| decals::airport_ground(&a.aprons).into_iter().chain(decals::airport_decals(&a.aprons)))
+        .collect();
     if loaded.placements.is_empty() && decal_list.is_empty() {
         return Ok(report);
     }
@@ -602,12 +613,11 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     // mode and layer, and drape the polygons in the package's drawing order.
     let decal_dir = objects_dir.join("decals");
     let mut polygon_defs: Vec<String> = Vec::new();
-    let mut def_of: HashMap<(String, bool, bool), usize> = HashMap::new();
+    let mut def_of: HashMap<(String, bool, DecalKind), usize> = HashMap::new();
     let mut draped: Vec<DrapedPolygon> = Vec::new();
     let mut missing_decals: HashSet<String> = HashSet::new();
-    for d in &decal_list {
-        let grime = d.kind == DecalKind::Grime;
-        let key = (d.texture.to_ascii_lowercase(), d.stretched, grime);
+    for d in decal_list.iter().filter(|_| opts.decals) {
+        let key = (d.texture.to_ascii_lowercase(), d.stretched, d.kind);
         let def = match def_of.get(&key) {
             Some(&i) => Some(i),
             None => match texture_for(&d.texture, f32::INFINITY) {
@@ -617,7 +627,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                         "{}_{}_{}.pol",
                         texture_stem(&d.texture),
                         if d.stretched { "fit" } else { "tile" },
-                        if grime { "grime" } else { "mark" }
+                        d.kind.label()
                     );
                     std::fs::write(decal_dir.join(&file), decals::pol_text(&format!("../{rel}"), d.stretched, d.kind))?;
                     polygon_defs.push(format!("objects/decals/{file}"));
@@ -635,9 +645,13 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                 def,
                 points: d.points.clone(),
             });
+            if d.kind == DecalKind::Ground {
+                report.ground_polygons += 1;
+            } else {
+                report.decals += 1;
+            }
         }
     }
-    report.decals = draped.len();
     let mut missing_decals: Vec<String> = missing_decals.into_iter().collect();
     missing_decals.sort();
     report.missing_decal_textures = missing_decals;

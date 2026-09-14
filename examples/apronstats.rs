@@ -29,6 +29,7 @@ fn main() -> anyhow::Result<()> {
                     Some(DecalKind::Grime) if !stretched => "skipped (tiled grime)",
                     Some(DecalKind::Grime) => "grime patch",
                     Some(DecalKind::Marking) => "marking",
+                    Some(DecalKind::Ground) => "ground",
                 };
                 // Flag byte and whether the outline is a square quad, per material,
                 // to look for a bit that flips the texture.

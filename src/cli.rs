@@ -105,6 +105,13 @@ pub struct ConvertArgs {
     /// msfs2xp-fixes.json is used.
     #[arg(long)]
     pub fixes: Option<PathBuf>,
+
+    /// Take each airport's ground layout (pavement, painted lines, signs, taxi
+    /// routes, stands, jetways) from this X-Plane apt.dat instead of converting
+    /// MSFS's, e.g. "X-Plane 12/Global Scenery/Global Airports/Earth nav data/apt.dat".
+    /// Buildings and other objects are still converted; MSFS's painted markings are not.
+    #[arg(long)]
+    pub ground: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

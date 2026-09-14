@@ -111,11 +111,20 @@ fn write_pack(
     reports: &[Report],
     titles: &[String],
     problems: &[String],
+    ground: Option<&Path>,
 ) -> anyhow::Result<(PathBuf, Vec<String>)> {
     let dir = out_root.join(folder);
     let nav = dir.join("Earth nav data");
     std::fs::create_dir_all(&nav).with_context(|| format!("creating {}", nav.display()))?;
-    let text = xplane::write(&Apt { airports });
+    let mut text = xplane::write(&Apt { airports });
+    if let Some(g) = ground {
+        let file = std::fs::File::open(g).with_context(|| format!("opening {}", g.display()))?;
+        let (merged, taken) = with_ground(&text, std::io::BufReader::new(file))?;
+        for icao in &taken {
+            println!("  ground: {icao} taken from {}", g.display());
+        }
+        text = merged;
+    }
     let issues = match xplane::validate(&text) {
         Ok(_) => Vec::new(),
         Err(e) => e,
@@ -125,6 +134,66 @@ fn write_pack(
     std::fs::write(dir.join("msfs2xp-report.json"), serde_json::to_string_pretty(reports)?)
         .context("writing report")?;
     Ok((dir, issues))
+}
+
+/// The ICAO of an apt.dat airport header row (land airport, seaplane base or
+/// heliport).
+fn airport_header(line: &str) -> Option<&str> {
+    let mut f = line.split_whitespace();
+    if !matches!(f.next(), Some("1" | "16" | "17")) {
+        return None;
+    }
+    f.nth(3)
+}
+
+/// Replace each airport in `ours` with the same airport from an X-Plane
+/// apt.dat (`ground`), header to the next airport, keeping ours where the
+/// ground file lacks it. Returns the new text and the airports replaced.
+fn with_ground(ours: &str, ground: impl std::io::BufRead) -> anyhow::Result<(String, Vec<String>)> {
+    use std::collections::HashMap;
+    let wanted: Vec<&str> = ours.lines().filter_map(airport_header).collect();
+    let mut blocks: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current: Option<String> = None;
+    for line in ground.lines() {
+        let line = line?;
+        let line = line.trim_end_matches('\r');
+        if let Some(icao) = airport_header(line) {
+            if current.is_some() && blocks.len() == wanted.len() {
+                break;
+            }
+            current = wanted.contains(&icao).then(|| icao.to_string());
+        } else if line.trim() == "99" {
+            current = None;
+        }
+        if let Some(icao) = &current {
+            blocks.entry(icao.clone()).or_default().push(line.to_string());
+        }
+    }
+    let nl = if ours.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = String::with_capacity(ours.len());
+    let mut skipping = false;
+    let mut taken = Vec::new();
+    for line in ours.lines() {
+        if let Some(icao) = airport_header(line) {
+            skipping = false;
+            if let Some(rows) = blocks.get(icao) {
+                for r in rows {
+                    out.push_str(r);
+                    out.push_str(nl);
+                }
+                taken.push(icao.to_string());
+                skipping = true;
+                continue;
+            }
+        } else if line.trim() == "99" {
+            skipping = false;
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push_str(nl);
+        }
+    }
+    Ok((out, taken))
 }
 
 fn summary_row(r: &Report) -> String {
@@ -192,7 +261,7 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
         for r in &reports {
             println!("{}", summary_row(r));
         }
-        let (dir, issues) = write_pack(&args.out, &folder, apts, &reports, &titles, &problems)?;
+        let (dir, issues) = write_pack(&args.out, &folder, apts, &reports, &titles, &problems, args.ground.as_deref())?;
         if !issues.is_empty() {
             invalid += 1;
             eprintln!(
@@ -247,6 +316,7 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                     normal_maps: args.normal_maps,
                     normal_max: args.normal_max,
                     fixes: args.fixes.clone(),
+                    decals: args.ground.is_none(),
                 };
                 match crate::objects::build(&loaded, &dir, &opts) {
                     Ok(r) => {
@@ -286,6 +356,9 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                                 "  stand-ins: {total} X-Plane library objects for models not on this PC ({})",
                                 kinds.join(", ")
                             );
+                        }
+                        if r.ground_polygons > 0 {
+                            println!("  ground: {} pavement polygons draped with the package's own textures", r.ground_polygons);
                         }
                         if r.decals > 0 || !r.missing_decal_textures.is_empty() {
                             println!(
@@ -381,5 +454,18 @@ mod tests {
         );
         assert_eq!(pack_folder_name("A/B: C?"), "A-B- C- (msfs2xp)");
         assert_eq!(pack_folder_name("  "), "Converted airport (msfs2xp)");
+    }
+
+    #[test]
+    fn ground_layout_replaces_our_airport_only() {
+        let ours = "I\n1200 msfs2xp\n\n1 28 0 0 OMDB Ours\n100 ours\n1500 jetway\n\n1 600 0 0 KORD Ours\n100 kord\n\n99\n";
+        let ground = "I\r\n1200 gateway\r\n\r\n1 10 0 0 EGLL Heathrow\r\n100 egll\r\n\r\n1     62 0 0 OMDB Dubai Intl\r\n110 2 0.25 0 apron\r\n1500 gate\r\n\r\n1 5 0 0 OMDM Minhad\r\n100 omdm\r\n99\r\n";
+        let (text, taken) = with_ground(ours, ground.as_bytes()).unwrap();
+        assert_eq!(taken, vec!["OMDB".to_string()]);
+        assert!(text.contains("1     62 0 0 OMDB Dubai Intl\n110 2 0.25 0 apron\n1500 gate\n"));
+        assert!(!text.contains("100 ours") && !text.contains("1500 jetway"), "our OMDB rows are gone");
+        assert!(text.contains("1 600 0 0 KORD Ours\n100 kord\n"), "an airport the ground file lacks stays");
+        assert!(!text.contains("EGLL") && !text.contains("OMDM"), "other ground airports are not copied");
+        assert!(text.trim_end().ends_with("99"));
     }
 }

@@ -100,6 +100,8 @@ pub struct RawJetway {
 #[derive(Debug, Clone, Default)]
 pub struct RawRunway {
     pub surface: u8,
+    /// MSFS: the ground material the runway is painted with.
+    pub material: Option<Guid>,
     pub lat: f64,
     pub lon: f64,
     pub alt_m: f64,

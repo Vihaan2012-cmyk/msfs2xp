@@ -18,6 +18,8 @@ use walkdir::WalkDir;
 
 use crate::bgl::guid::Guid;
 use crate::model::{Airport, Surface};
+#[cfg(test)]
+use crate::model::Apron;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterialInfo {
@@ -25,6 +27,22 @@ pub struct MaterialInfo {
     pub surface_type: String,
     /// File name of the decal texture (binding MTL_BITMAP_DECAL0), if any.
     pub decal_texture: Option<String>,
+    /// Where that texture is on disk, when the library was read from a file.
+    pub texture_path: Option<PathBuf>,
+}
+
+/// Mean brightness (0..=255) of a material's colour texture, from a small mip
+/// level. This is what separates iniBuilds' dark taxiway asphalt from its
+/// light concrete tiles, and X-Plane 12 has pavement variants for both.
+pub fn brightness(info: &MaterialInfo) -> Option<u8> {
+    let data = std::fs::read(info.texture_path.as_ref()?).ok()?;
+    let (_, _, rgba) = crate::texture::decode_within(&data, 32).ok()?;
+    let (mut sum, mut n) = (0.0f64, 0u32);
+    for p in rgba.chunks_exact(4).filter(|p| p[3] >= 8) {
+        sum += 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
+        n += 1;
+    }
+    (n > 0).then(|| (sum / n as f64).round() as u8)
 }
 
 /// Every material we could find, keyed by GUID.
@@ -50,31 +68,43 @@ impl MaterialCatalog {
         self.map.entry(guid).or_insert(info);
     }
 
+    /// Every material with this name, ignoring case (stock libraries repeat
+    /// names with different textures).
+    pub fn find_by_name<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a MaterialInfo> + 'a {
+        self.map.values().filter(move |m| m.name.eq_ignore_ascii_case(name))
+    }
+
     /// Parse one `Library.xml`. Returns how many materials it defined.
     pub fn load_library_text(&mut self, xml: &str) -> usize {
-        let Ok(doc) = roxmltree::Document::parse(xml) else {
+        let found = parse_library(xml);
+        let n = found.len();
+        for (guid, info) in found {
+            self.insert(guid, info);
+        }
+        n
+    }
+
+    /// Load a `Library.xml` from disk, locating each material's texture in
+    /// the `Textures` folder beside it.
+    pub fn load_library_file(&mut self, path: &Path) -> usize {
+        let Ok(xml) = std::fs::read_to_string(path) else {
             return 0;
         };
-        let mut n = 0;
-        for node in doc.descendants().filter(|n| n.has_tag_name("Material")) {
-            let Some(guid) = node.attribute("Guid").and_then(|g| g.parse::<Guid>().ok()) else {
-                continue;
-            };
-            let decal_texture = node
-                .descendants()
-                .filter(|t| t.has_tag_name("Texture"))
-                .find(|t| t.attribute("Binding") == Some("MTL_BITMAP_DECAL0"))
-                .and_then(|t| t.attribute("FileName"))
-                .map(|f| f.rsplit(|c: char| c == '/' || c as u32 == 92).next().unwrap_or(f).to_string());
-            self.insert(
-                guid,
-                MaterialInfo {
-                    name: node.attribute("Name").unwrap_or_default().to_string(),
-                    surface_type: node.attribute("SurfaceType").unwrap_or_default().to_string(),
-                    decal_texture,
-                },
-            );
-            n += 1;
+        // Textures may sit in sub-folders ("TEXTURES\Decals\..."); names are
+        // unique enough to match on the file name alone.
+        let textures: HashMap<String, PathBuf> = path
+            .parent()
+            .map(|d| WalkDir::new(d.join("Textures")))
+            .into_iter()
+            .flat_map(|w| w.into_iter().filter_map(Result::ok))
+            .filter(|e| e.file_type().is_file())
+            .map(|e| (e.file_name().to_string_lossy().to_ascii_lowercase(), e.path().to_path_buf()))
+            .collect();
+        let found = parse_library(&xml);
+        let n = found.len();
+        for (guid, mut info) in found {
+            info.texture_path = info.decal_texture.as_ref().and_then(|t| textures.get(&t.to_ascii_lowercase()).cloned());
+            self.insert(guid, info);
         }
         n
     }
@@ -89,8 +119,7 @@ impl MaterialCatalog {
             .into_iter()
             .filter_map(Result::ok)
             .filter(|e| e.file_name().eq_ignore_ascii_case("Library.xml"))
-            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-            .map(|text| self.load_library_text(&text))
+            .map(|e| self.load_library_file(e.path()))
             .sum()
     }
 
@@ -114,6 +143,34 @@ impl MaterialCatalog {
         }
         n
     }
+}
+
+/// Every material in a `Library.xml`.
+fn parse_library(xml: &str) -> Vec<(Guid, MaterialInfo)> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return Vec::new();
+    };
+    doc.descendants()
+        .filter(|n| n.has_tag_name("Material"))
+        .filter_map(|node| {
+            let guid = node.attribute("Guid").and_then(|g| g.parse::<Guid>().ok())?;
+            let decal_texture = node
+                .descendants()
+                .filter(|t| t.has_tag_name("Texture"))
+                .find(|t| t.attribute("Binding") == Some("MTL_BITMAP_DECAL0"))
+                .and_then(|t| t.attribute("FileName"))
+                .map(|f| f.rsplit(|c: char| c == '/' || c as u32 == 92).next().unwrap_or(f).to_string());
+            Some((
+                guid,
+                MaterialInfo {
+                    name: node.attribute("Name").unwrap_or_default().to_string(),
+                    surface_type: node.attribute("SurfaceType").unwrap_or_default().to_string(),
+                    decal_texture,
+                    texture_path: None,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// The MSFS 2020 install's official package folders (`Official/OneStore`,
@@ -168,16 +225,18 @@ pub fn classify_ground(info: &MaterialInfo) -> GroundClass {
     if has_any(&name, DECAL_WORDS) || name.starts_with("ini_dirt_") {
         return GroundClass::Decal;
     }
-    // Soft ground is checked first: Asobo's "CEMENTDIRT01" is a dirt ground
-    // cover used for infields, not a concrete pad.
-    let by_name = if has_any(&name, &["dirt", "sand", "soil", "clay", "mud"]) {
-        Some(Surface::Dirt)
-    } else if has_any(&name, &["grass", "turf"]) {
-        Some(Surface::Grass)
-    } else if has_any(&name, &["concrete", "cement", "beton"]) {
+    // Hard surfaces are checked first: Asobo's "CEMENTDIRT01" and
+    // "ConcreteDirt01" are grey cement (tagged Asobo_Concrete, cement
+    // textures) and "AsphaltFloor_Dirt01" is asphalt; the "dirt" means worn.
+    // Read as dirt, Dubai's stands and aprons came out as sand.
+    let by_name = if has_any(&name, &["concrete", "cement", "beton"]) {
         Some(Surface::Concrete)
     } else if has_any(&name, &["asphalt", "tarmac", "bitum", "macadam"]) {
         Some(Surface::Asphalt)
+    } else if has_any(&name, &["dirt", "sand", "soil", "clay", "mud"]) {
+        Some(Surface::Dirt)
+    } else if has_any(&name, &["grass", "turf"]) {
+        Some(Surface::Grass)
     } else if name.contains("gravel") {
         Some(Surface::Gravel)
     } else {
@@ -234,6 +293,10 @@ pub struct LineLook {
     pub colour: LineColour,
     pub dashed: bool,
     pub hold_short: bool,
+    /// Painted with a black border (iniBuilds' taxiway lines).
+    pub bordered: bool,
+    /// A taxiway edge line rather than a centreline.
+    pub edge: bool,
     /// Outlines, seams and faded lines: texture detail X-Plane draws itself.
     pub skip: bool,
 }
@@ -245,8 +308,12 @@ pub fn classify_line(info: &MaterialInfo) -> LineLook {
 /// [`classify_line`] for a bare material name.
 pub fn classify_line_name(name: &str) -> LineLook {
     let name = name.to_ascii_lowercase();
+    // iniBuilds' taxiway lines "INI_CenterLine_Black" and "INI_Edge_Line_Black"
+    // are yellow lines with a black border (their textures show it), not
+    // black outlines; they carry every centreline and edge line at Dubai.
+    let bordered = name.contains("black") && has_any(&name, &["centerline", "centreline", "edge_line", "edgeline"]);
     let white = name.contains("white");
-    let yellow = name.contains("yellow") || name.contains("_wy") || name.contains("wy_");
+    let yellow = bordered || name.contains("yellow") || name.contains("_wy") || name.contains("wy_");
     let red = name.contains("red");
     let colour = if yellow {
         LineColour::Yellow
@@ -262,7 +329,9 @@ pub fn classify_line_name(name: &str) -> LineLook {
         // "Dasjed" is a real typo in a shipping iniBuilds material name.
         dashed: has_any(&name, &["dash", "dasjed", "broken"]),
         hold_short: name.contains("hold"),
-        skip: has_any(&name, &["black", "seam", "faded", "shadow", "grunge", "crack"]),
+        bordered,
+        edge: name.contains("edge"),
+        skip: !bordered && has_any(&name, &["black", "seam", "faded", "shadow", "grunge", "crack"]),
     }
 }
 
@@ -273,11 +342,41 @@ pub struct ResolveStats {
     pub aprons_from_tint: usize,
     pub aprons_defaulted: usize,
     pub lines_named: usize,
+    pub runways_named: usize,
+    /// Aprons whose material is not on this PC, textured with a stock
+    /// stand-in of the same class.
+    pub aprons_stand_in_texture: usize,
+}
+
+/// A stock material to texture pavement whose own material is not on this PC
+/// (MSFS 2024 streams its stock ground materials). Among the simulator's plain
+/// asphalts and concretes, the one whose texture is nearest a typical airport
+/// shade: dark grey taxiway asphalt, mid-grey concrete. Stock names repeat
+/// across libraries with textures from near black to near white, so the
+/// choice is by measured brightness, not by name alone.
+fn stand_in_material(catalog: &MaterialCatalog, surface: Surface) -> Option<(&MaterialInfo, u8)> {
+    let (names, target): (&[&str], i32) = match surface {
+        Surface::Asphalt => (&["Asphalt_Generic05", "Asphalt_Generic06", "Asphalt_Generic03", "Asphalt_Generic02", "Taxi_Asphalt"], 85),
+        Surface::Concrete => (&["ConcreteDirt01", "Aso_Concrete", "Concrete11", "CEMENTDIRT01", "Tile_Concrete01"], 125),
+        _ => return None,
+    };
+    names
+        .iter()
+        .flat_map(|n| catalog.find_by_name(n))
+        .filter_map(|m| brightness(m).map(|b| (m, b)))
+        .min_by_key(|(_, b)| (*b as i32 - target).abs())
 }
 
 /// Give every apron a surface and every painted line a material name.
 pub fn resolve_airport(ap: &mut Airport, catalog: &MaterialCatalog) -> ResolveStats {
     let mut stats = ResolveStats::default();
+    // Texture brightness is read once per material.
+    let mut bright: HashMap<Guid, Option<u8>> = HashMap::new();
+    let mut brightness_of = |guid: Guid, info: &MaterialInfo| *bright.entry(guid).or_insert_with(|| brightness(info));
+    let stand_ins: HashMap<Surface, (&MaterialInfo, u8)> = [Surface::Asphalt, Surface::Concrete]
+        .into_iter()
+        .filter_map(|s| stand_in_material(catalog, s).map(|m| (s, m)))
+        .collect();
     for a in &mut ap.aprons {
         let Some(guid) = a.material_guid else { continue };
         match catalog.get(&guid) {
@@ -285,7 +384,10 @@ pub fn resolve_airport(ap: &mut Airport, catalog: &MaterialCatalog) -> ResolveSt
                 a.material_name = Some(info.name.clone());
                 a.decal_texture = info.decal_texture.clone();
                 match classify_ground(info) {
-                    GroundClass::Pavement(s) => a.surface = s,
+                    GroundClass::Pavement(s) => {
+                        a.surface = s;
+                        a.brightness = brightness_of(guid, info);
+                    }
                     GroundClass::Decal => a.draw = false,
                     GroundClass::Unknown => a.surface = surface_from_tint(a.tint).unwrap_or(Surface::Asphalt),
                 }
@@ -295,6 +397,11 @@ pub fn resolve_airport(ap: &mut Airport, catalog: &MaterialCatalog) -> ResolveSt
                 Some(s) => {
                     a.surface = s;
                     stats.aprons_from_tint += 1;
+                    if let Some((m, b)) = stand_ins.get(&s) {
+                        a.decal_texture = m.decal_texture.clone();
+                        a.brightness = Some(*b);
+                        stats.aprons_stand_in_texture += 1;
+                    }
                 }
                 None => {
                     a.surface = Surface::Asphalt;
@@ -310,8 +417,24 @@ pub fn resolve_airport(ap: &mut Airport, catalog: &MaterialCatalog) -> ResolveSt
         }
     }
     for p in &mut ap.taxi_paths {
-        if let Some(info) = p.material_guid.and_then(|g| catalog.get(&g)) {
+        let Some(guid) = p.material_guid else { continue };
+        if let Some(info) = catalog.get(&guid) {
             p.material_name = Some(info.name.clone());
+            if let GroundClass::Pavement(s) = classify_ground(info) {
+                p.surface = s;
+                p.brightness = brightness_of(guid, info);
+            }
+        }
+    }
+    for r in &mut ap.runways {
+        let Some(guid) = r.material_guid else { continue };
+        if let Some(info) = catalog.get(&guid) {
+            r.material_name = Some(info.name.clone());
+            stats.runways_named += 1;
+            if let GroundClass::Pavement(s) = classify_ground(info) {
+                r.surface = s;
+                r.brightness = brightness_of(guid, info);
+            }
         }
     }
     stats
@@ -326,7 +449,30 @@ mod tests {
             name: name.into(),
             surface_type: surface.into(),
             decal_texture: None,
+            texture_path: None,
         }
+    }
+
+    #[test]
+    fn brightness_comes_from_the_texture_next_to_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Textures")).unwrap();
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([100, 100, 100, 255]))
+            .save(dir.path().join("Textures").join("DARK.PNG"))
+            .unwrap();
+        std::fs::write(
+            dir.path().join("Library.xml"),
+            r#"<Library><Material Name="INI_Asphalt_9" Guid="{BA5CE1B0-FEE5-42C1-8AF1-75FC656D3226}" SurfaceType="CEMENT">
+                <TextureList><Texture FileName="TEXTURES\dark.png" Binding="MTL_BITMAP_DECAL0"/></TextureList></Material></Library>"#,
+        )
+        .unwrap();
+        let mut cat = MaterialCatalog::default();
+        assert_eq!(cat.load_library_file(&dir.path().join("Library.xml")), 1);
+        let g: Guid = "{BA5CE1B0-FEE5-42C1-8AF1-75FC656D3226}".parse().unwrap();
+        let m = cat.get(&g).unwrap();
+        assert!(m.texture_path.is_some(), "found despite the case difference");
+        assert_eq!(brightness(m), Some(100));
+        assert_eq!(brightness(&info("x", "y")), None);
     }
 
     const LIB: &str = r#"<Library Version="1.1.0">
@@ -345,15 +491,71 @@ mod tests {
     }
 
     #[test]
+    fn unknown_ground_materials_get_a_stock_stand_in_texture() {
+        // Two stock asphalts and two concretes, at different brightnesses:
+        // the stand-in is the one nearest a typical airport shade.
+        let dir = tempfile::tempdir().unwrap();
+        let tex = dir.path().join("Textures");
+        std::fs::create_dir_all(&tex).unwrap();
+        let mut xml = String::from("<Library>");
+        for (i, (name, level)) in [("Asphalt_Generic03", 40u8), ("Asphalt_Generic05", 90), ("ConcreteDirt01", 200), ("Aso_Concrete", 120)]
+            .iter()
+            .enumerate()
+        {
+            image::RgbaImage::from_pixel(4, 4, image::Rgba([*level, *level, *level, 255]))
+                .save(tex.join(format!("{name}.png")))
+                .unwrap();
+            xml.push_str(&format!(
+                r#"<Material Name="{name}" Guid="{{{i}{i}{i}{i}{i}{i}{i}{i}-1111-1111-1111-111111111111}}" SurfaceType="CEMENT">
+                   <TextureList><Texture FileName="TEXTURES\{name}.png" Binding="MTL_BITMAP_DECAL0"/></TextureList></Material>"#
+            ));
+        }
+        xml.push_str("</Library>");
+        std::fs::write(dir.path().join("Library.xml"), xml).unwrap();
+        let mut cat = MaterialCatalog::default();
+        assert_eq!(cat.load_library_file(&dir.path().join("Library.xml")), 4);
+        let streamed: Guid = "{8E26DDCB-02D6-4436-972E-3D8921C4EFB4}".parse().unwrap();
+        let apron = |tint| Apron {
+            draw: true,
+            material_guid: Some(streamed),
+            tint,
+            ..Default::default()
+        };
+        let mut ap = Airport {
+            aprons: vec![apron([0, 0, 1, 255]), apron([114, 121, 123, 255]), apron([0, 0, 0, 0])],
+            ..Default::default()
+        };
+        let st = resolve_airport(&mut ap, &cat);
+        assert_eq!((st.aprons_from_tint, st.aprons_stand_in_texture, st.aprons_defaulted), (2, 2, 1));
+        assert_eq!(ap.aprons[0].surface, Surface::Asphalt);
+        assert_eq!(ap.aprons[0].decal_texture.as_deref(), Some("Asphalt_Generic05.png"), "90 is nearer 85 than 40");
+        assert_eq!(ap.aprons[0].brightness, Some(90));
+        assert_eq!(ap.aprons[1].surface, Surface::Concrete);
+        assert_eq!(ap.aprons[1].decal_texture.as_deref(), Some("Aso_Concrete.png"), "120 is nearer 125 than 200");
+        assert!(ap.aprons[2].decal_texture.is_none(), "no tint, nothing to go on");
+    }
+
+    #[test]
     fn names_beat_the_physics_surface_type() {
         assert_eq!(
             classify_ground(&info("INI_Asphalt_1", "CONCRETE")),
             GroundClass::Pavement(Surface::Asphalt)
         );
+        // Worn pavement, not dirt ground: Asobo tags these concrete and asphalt.
         assert_eq!(
             classify_ground(&info("CEMENTDIRT01", "CEMENT")),
-            GroundClass::Pavement(Surface::Dirt)
+            GroundClass::Pavement(Surface::Concrete)
         );
+        assert_eq!(
+            classify_ground(&info("ConcreteDirt01", "CEMENT")),
+            GroundClass::Pavement(Surface::Concrete)
+        );
+        assert_eq!(
+            classify_ground(&info("AsphaltFloor_Dirt01", "CEMENT")),
+            GroundClass::Pavement(Surface::Asphalt)
+        );
+        assert_eq!(classify_ground(&info("MudSand", "UNDEFINED")), GroundClass::Pavement(Surface::Dirt));
+        assert_eq!(classify_ground(&info("Groud_sand", "DIRT")), GroundClass::Pavement(Surface::Dirt));
         assert_eq!(
             classify_ground(&info("PaintRough01", "CEMENT")),
             GroundClass::Pavement(Surface::Concrete)
@@ -380,7 +582,13 @@ mod tests {
         assert_eq!((l.colour, l.dashed, l.skip), (LineColour::Yellow, true, false));
         let l = classify_line(&info("INI_Lines_Dashed_White", "UNDEFINED"));
         assert_eq!((l.colour, l.dashed), (LineColour::White, true));
-        assert!(classify_line(&info("INI_CenterLine_Black_Dasjed", "CONCRETE")).skip);
+        let l = classify_line(&info("INI_CenterLine_Black_Dasjed", "CONCRETE"));
+        assert_eq!((l.colour, l.dashed, l.bordered, l.skip), (LineColour::Yellow, true, true, false));
+        let l = classify_line(&info("INI_CenterLine_Black", "CEMENT"));
+        assert_eq!((l.colour, l.dashed, l.bordered, l.edge, l.skip), (LineColour::Yellow, false, true, false, false));
+        let l = classify_line(&info("INI_Edge_Line_Black", "CEMENT"));
+        assert_eq!((l.colour, l.bordered, l.edge, l.skip), (LineColour::Yellow, true, true, false));
+        assert!(classify_line(&info("Asphalt05_BLack", "ASPHALT")).skip, "other black lines stay out");
         let red = classify_line(&info("INI_Red_Lines", "PAINT"));
         assert_eq!((red.colour, red.skip), (LineColour::Red, false), "X-Plane has red lines");
         assert!(!classify_line(&info("INI_Red_White", "PAINT")).skip);

@@ -34,7 +34,7 @@ impl SimKind {
 }
 
 /// Ground surface material, normalised across simulators.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Surface {
     #[default]
     Concrete,
@@ -199,6 +199,11 @@ pub struct Runway {
     pub length_m: f32,
     pub width_m: f32,
     pub surface: Surface,
+    /// MSFS ground material, its name once resolved, and the mean brightness
+    /// (0..=255) of its texture, which picks the X-Plane pavement shade.
+    pub material_guid: Option<crate::bgl::guid::Guid>,
+    pub material_name: Option<String>,
+    pub brightness: Option<u8>,
     pub ends: [RunwayEnd; 2],
     pub edge_lights: LightLevel,
     pub centre_lights: LightLevel,
@@ -363,6 +368,8 @@ pub struct TaxiPath {
     /// resolved from the material libraries.
     pub material_guid: Option<crate::bgl::guid::Guid>,
     pub material_name: Option<String>,
+    /// Mean brightness (0..=255) of the material's texture, when known.
+    pub brightness: Option<u8>,
 }
 
 /// Stand category.
@@ -477,6 +484,8 @@ pub struct Apron {
     pub priority: u32,
     /// Decal texture file name, once the material is resolved.
     pub decal_texture: Option<String>,
+    /// Mean brightness (0..=255) of the material's texture, when known.
+    pub brightness: Option<u8>,
 }
 
 /// Painted ground marking style, as named in the MSFS scenery editor.

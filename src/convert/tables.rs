@@ -26,6 +26,29 @@ pub fn surface_code(s: &Surface) -> u8 {
     }
 }
 
+/// X-Plane 12 surface code with a shade chosen from the material texture's
+/// mean brightness (0..=255): the asphalt variants 20/24/27/31/35 run from
+/// light to near black and the concrete variants 50/53/55 from new to dark.
+/// Without a brightness the plain X-Plane 11 codes stand.
+pub fn shaded_surface_code(s: &Surface, brightness: Option<u8>) -> u8 {
+    let base = surface_code(s);
+    match (base, brightness) {
+        (surface::ASPHALT, Some(b)) => match b {
+            115.. => 20,
+            90..=114 => 24,
+            78..=89 => 27,
+            60..=77 => 31,
+            _ => 35,
+        },
+        (surface::CONCRETE, Some(b)) => match b {
+            135.. => 50,
+            100..=134 => 53,
+            _ => 55,
+        },
+        _ => base,
+    }
+}
+
 /// Runway marking style for one end.
 ///
 /// Precision beats non-precision beats visual; MSFS's "alternate" flags mark the
@@ -141,6 +164,16 @@ mod tests {
         assert_eq!(surface_code(&Surface::Sand), surface::DIRT);
         assert_eq!(surface_code(&Surface::Water), surface::WATER);
         assert_eq!(surface_code(&Surface::Transparent), surface::TRANSPARENT);
+        // iniBuilds' Dubai: taxiway asphalt averages 75, concrete tiles 141,
+        // Asobo's cement 107.
+        assert_eq!(shaded_surface_code(&Surface::Asphalt, Some(75)), 31);
+        assert_eq!(shaded_surface_code(&Surface::Asphalt, Some(40)), 35);
+        assert_eq!(shaded_surface_code(&Surface::Asphalt, Some(120)), 20);
+        assert_eq!(shaded_surface_code(&Surface::Concrete, Some(141)), 50);
+        assert_eq!(shaded_surface_code(&Surface::Cement, Some(107)), 53);
+        assert_eq!(shaded_surface_code(&Surface::Concrete, Some(80)), 55);
+        assert_eq!(shaded_surface_code(&Surface::Asphalt, None), surface::ASPHALT);
+        assert_eq!(shaded_surface_code(&Surface::Dirt, Some(200)), surface::DIRT);
     }
 
     #[test]

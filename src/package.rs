@@ -304,8 +304,8 @@ pub fn load(source: &Source, hint: Option<Variant>) -> Loaded {
         let total = st.aprons_named + st.aprons_from_tint + st.aprons_defaulted;
         if total > 0 {
             loaded.notes.push(format!(
-                "{}: ground materials named {} of {total}, guessed from tint {}, defaulted {}; {} painted lines named",
-                ap.icao, st.aprons_named, st.aprons_from_tint, st.aprons_defaulted, st.lines_named
+                "{}: ground materials named {} of {total}, guessed from tint {} ({} textured with stock stand-ins), defaulted {}; {} painted lines named",
+                ap.icao, st.aprons_named, st.aprons_from_tint, st.aprons_stand_in_texture, st.aprons_defaulted, st.lines_named
             ));
         }
     }

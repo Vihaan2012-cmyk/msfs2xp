@@ -221,8 +221,10 @@ pub fn validate(text: &str) -> Result<ValidationReport, Vec<String>> {
                 }
             }
             21 => {
+                // lat lon type heading glideslope, then an optional runway and
+                // description (X-Plane's own airports often leave them out).
                 let kind = num(rest.get(2).copied()).unwrap_or(0.0) as i64;
-                if rest.len() < 6 || !(1..=8).contains(&kind) {
+                if rest.len() < 5 || !(1..=8).contains(&kind) {
                     errors.push(format!("line {lineno}: light object row malformed"));
                 }
             }

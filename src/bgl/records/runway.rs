@@ -64,6 +64,11 @@ pub fn parse_runway(rec: &RecordSlice, msfs: bool, warnings: &mut Vec<String>) -
         }
         None => data.len(),
     };
+    // The MSFS head keeps the material GUID after 24 bytes of unknowns.
+    if start >= 6 + HEAD_MSFS {
+        let at = 6 + HEAD_FSX + 24;
+        rw.material = data.get(at..at + 16).and_then(crate::bgl::guid::Guid::from_slice).filter(|g| !g.is_nil());
+    }
 
     for sub in SubRecords::new(data, start) {
         match sub.id {

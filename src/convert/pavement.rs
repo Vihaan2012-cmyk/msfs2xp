@@ -20,7 +20,7 @@ use crate::geo::Plane;
 use crate::model::{Airport, PathKind};
 use crate::xplane::apt::{self, surface, AptAirport, Node};
 
-use super::tables::surface_code;
+use super::tables::shaded_surface_code;
 use super::{Options, Report};
 
 /// Paint order for taxiway surfaces: soft ground first, then asphalt, then
@@ -37,8 +37,8 @@ fn draw_rank(code: u8) -> u8 {
 
 fn surface_name(code: u8) -> &'static str {
     match code {
-        surface::ASPHALT => "Asphalt",
-        surface::CONCRETE => "Concrete",
+        surface::ASPHALT | 20..=38 => "Asphalt",
+        surface::CONCRETE | 50..=57 => "Concrete",
         surface::GRASS => "Grass",
         surface::DIRT => "Dirt",
         surface::GRAVEL => "Gravel",
@@ -87,7 +87,7 @@ pub fn build(ap: &Airport, plane: &Plane, opts: &Options, out: &mut AptAirport, 
         if !paints || p.width_m <= 0.0 {
             continue;
         }
-        let code = surface_code(&p.surface);
+        let code = shaded_surface_code(&p.surface, p.brightness);
         if code == surface::TRANSPARENT {
             continue;
         }
@@ -147,7 +147,7 @@ pub fn build(ap: &Airport, plane: &Plane, opts: &Options, out: &mut AptAirport, 
     let mut groups: Vec<Group> = Vec::new();
     let mut group_of: HashMap<(i32, u8), usize> = HashMap::new();
     for (i, a) in ap.aprons.iter().enumerate() {
-        let code = surface_code(&a.surface);
+        let code = shaded_surface_code(&a.surface, a.brightness);
         if !a.draw || code == surface::TRANSPARENT || code == surface::WATER {
             report.dropped("decals, invisible and water aprons", 1);
             continue;

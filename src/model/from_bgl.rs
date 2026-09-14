@@ -322,6 +322,9 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
             length_m: r.length_m,
             width_m: r.width_m,
             surface: surface_from_code(r.surface),
+            material_guid: r.material,
+            material_name: None,
+            brightness: None,
             ends: [
                 runway_end(&r.primary, r.marking_flags, true, r.pattern_flags),
                 runway_end(&r.secondary, r.marking_flags, false, r.pattern_flags),
@@ -497,6 +500,7 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
                 right_edge_lit: p.right_edge_lit,
                 material_guid: p.material,
                 material_name: None,
+                brightness: None,
             }
         })
         .collect();
@@ -525,6 +529,7 @@ pub fn airport_from_raw(raw: RawAirport, file: &str, package: &str) -> Airport {
             uv_rotation: a.uv_rotation,
             priority: a.priority,
             decal_texture: None,
+            brightness: None,
         })
         .collect();
 

@@ -18,17 +18,45 @@
 //!
 //! Skipped: runway numbers (X-Plane paints its own) and the aircraft-type
 //! label atlas (which label each piece shows could not be established).
+//!
+//! The pavement itself is draped the same way: every drawn ground polygon
+//! gets its MSFS material texture tiled over it, above the apt.dat pavement
+//! (which stays underneath for taxiing physics and as a fallback). X-Plane's
+//! own pavement is one flat shade, and a whole airport of it reads as a slab;
+//! the package's dark asphalt and light concrete tiles are what make the
+//! airport look like itself.
 
 use crate::geo::{LatLon, Plane};
 use crate::model::Apron;
 
 /// What kind of marking a decal is, which sets its draw layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DecalKind {
+    /// The pavement texture itself, over the apt.dat pavement.
+    Ground,
     /// Tyre marks and dirt: drawn below the other markings.
     Grime,
     /// Painted markings and stencils.
     Marking,
+}
+
+impl DecalKind {
+    /// Drawing order, lowest first.
+    fn rank(self) -> u8 {
+        match self {
+            DecalKind::Ground => 0,
+            DecalKind::Grime => 1,
+            DecalKind::Marking => 2,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DecalKind::Ground => "ground",
+            DecalKind::Grime => "grime",
+            DecalKind::Marking => "mark",
+        }
+    }
 }
 
 /// One decal polygon ready for a DSF: `(lon, lat, s, t)` per vertex,
@@ -190,20 +218,46 @@ pub fn airport_decals(aprons: &[Apron]) -> Vec<DecalPolygon> {
             });
         }
     }
-    out.sort_by_key(|d| (d.kind == DecalKind::Marking, d.priority));
+    // MSFS stores the priority as a u32 holding a signed value.
+    out.sort_by_key(|d| (d.kind.rank(), d.priority as i32));
+    out
+}
+
+/// The drawn pavement of an airport's aprons as textured polygons, in the
+/// package's drawing order, each tiled with its material's texture.
+pub fn airport_ground(aprons: &[Apron]) -> Vec<DecalPolygon> {
+    let mut out = Vec::new();
+    for a in aprons.iter().filter(|a| a.draw) {
+        let Some(texture) = a.decal_texture.as_deref() else { continue };
+        // MSFS tiles ground materials every `uv_scale` metres; a few records
+        // leave it unset, and 25 m is what every iniBuilds apron uses.
+        let scale = if a.uv_scale.is_finite() && a.uv_scale > 0.01 { a.uv_scale } else { 25.0 };
+        if let Some(points) = texture_polygon(&a.vertices, scale, a.uv_rotation, false) {
+            out.push(DecalPolygon {
+                texture: texture.to_string(),
+                stretched: false,
+                kind: DecalKind::Ground,
+                priority: a.priority,
+                points,
+            });
+        }
+    }
+    out.sort_by_key(|d| d.priority as i32);
     out
 }
 
 /// The `.pol` definition for a decal texture.
 pub fn pol_text(texture_path: &str, stretched: bool, kind: DecalKind) -> String {
     let tex = if stretched { "TEXTURE_NOWRAP" } else { "TEXTURE" };
-    // Below apt.dat painted lines (layer "markings" 0), above all pavement;
-    // grime under the painted markings.
+    // Ground textures sit just above the apt.dat pavement (layer "taxiways")
+    // and under the runways; markings go below apt.dat painted lines (layer
+    // "markings" 0), grime under the painted markings.
     let layer = match kind {
-        DecalKind::Grime => -2,
-        DecalKind::Marking => -1,
+        DecalKind::Ground => "taxiways 1",
+        DecalKind::Grime => "markings -2",
+        DecalKind::Marking => "markings -1",
     };
-    format!("A\n850\nDRAPED_POLYGON\n\n{tex} {texture_path}\nSCALE 25 25\nLAYER_GROUP markings {layer}\n")
+    format!("A\n850\nDRAPED_POLYGON\n\n{tex} {texture_path}\nSCALE 25 25\nLAYER_GROUP {layer}\n")
 }
 
 #[cfg(test)]
@@ -365,5 +419,29 @@ mod tests {
         assert!(t.contains("LAYER_GROUP markings -1"));
         assert!(!t.contains("NO_ALPHA"), "decals need their alpha");
         assert!(pol_text("x.dds", true, DecalKind::Grime).contains("TEXTURE_NOWRAP x.dds"));
+        assert!(pol_text("x.dds", false, DecalKind::Ground).contains("LAYER_GROUP taxiways 1"));
+    }
+
+    #[test]
+    fn drawn_pavement_is_draped_with_its_texture_in_priority_order() {
+        let apron = |draw: bool, priority: u32, texture: Option<&str>, uv_scale: f32| Apron {
+            draw,
+            priority,
+            decal_texture: texture.map(str::to_string),
+            uv_scale,
+            vertices: square(41.97, -87.9, 50.0),
+            ..Default::default()
+        };
+        let g = airport_ground(&[
+            apron(true, 5, Some("A.DDS"), 25.0),
+            apron(true, u32::MAX, Some("B.DDS"), 0.0), // priority -1, unset tiling
+            apron(false, 0, Some("D.DDS"), 25.0),      // a decal, not pavement
+            apron(true, 2, None, 25.0),                // no texture to drape
+        ]);
+        assert_eq!(g.iter().map(|d| d.texture.as_str()).collect::<Vec<_>>(), ["B.DDS", "A.DDS"]);
+        assert!(g.iter().all(|d| d.kind == DecalKind::Ground && !d.stretched));
+        // 50 m square tiled every 25 m spans two texture repeats.
+        let s_max = g[1].points.iter().map(|p| p.2).fold(f64::MIN, f64::max);
+        assert!((s_max - 2.0).abs() < 0.05, "{s_max}");
     }
 }

@@ -27,6 +27,9 @@ mod code {
     pub const RED: u8 = 30;
     pub const RED_BROKEN: u8 = 31;
     pub const RED_WIDE: u8 = 32;
+    pub const CENTRE_BORDERED: u8 = 51;
+    pub const BOUNDARY_BORDERED: u8 = 52;
+    pub const EDGE_BORDERED: u8 = 53;
     pub const LIGHT_CENTRE: u8 = 101;
     pub const LIGHT_EDGE: u8 = 102;
     pub const LIGHT_HOLD: u8 = 103;
@@ -319,7 +322,9 @@ fn light_for(l: &PaintedLine, line: u8) -> u8 {
     match line {
         code::RUNWAY_HOLD | code::OTHER_HOLD => code::LIGHT_HOLD,
         code::ILS_HOLD => code::LIGHT_ILS_HOLD,
-        code::EDGE | code::WIDE_DOUBLE_BROKEN | code::BOUNDARY => code::LIGHT_EDGE,
+        code::EDGE | code::EDGE_BORDERED | code::WIDE_DOUBLE_BROKEN | code::BOUNDARY | code::BOUNDARY_BORDERED => {
+            code::LIGHT_EDGE
+        }
         _ => code::LIGHT_CENTRE,
     }
 }
@@ -336,9 +341,11 @@ fn line_code_for(l: &PaintedLine) -> Option<u8> {
         if look.hold_short {
             return Some(code::RUNWAY_HOLD);
         }
+        let bordered = |plain, with_border| Some(if look.bordered { with_border } else { plain });
         match (look.colour, look.dashed) {
-            (LineColour::Yellow, false) => return Some(code::CENTRE),
-            (LineColour::Yellow, true) => return Some(code::BOUNDARY),
+            (LineColour::Yellow, _) if look.edge => return bordered(code::EDGE, code::EDGE_BORDERED),
+            (LineColour::Yellow, false) => return bordered(code::CENTRE, code::CENTRE_BORDERED),
+            (LineColour::Yellow, true) => return bordered(code::BOUNDARY, code::BOUNDARY_BORDERED),
             (LineColour::White, false) => return Some(code::WHITE_SOLID),
             (LineColour::White, true) => return Some(code::WHITE_BROKEN),
             (LineColour::Red, false) => return Some(code::RED),
@@ -417,13 +424,17 @@ mod tests {
                 line("INI_Lines_Dashed_White"),
                 line("INI_CenterLine_Black"),
                 line("INI_Yellow_Lines"),
+                line("INI_Edge_Line_Black"),
+                line("INI_Seam"),
             ],
             ..Default::default()
         };
         let out = run(&ap);
-        assert_eq!(out.lines.len(), 2, "the black outline is dropped");
+        assert_eq!(out.lines.len(), 4, "the seam is dropped");
         assert_eq!(out.lines[0].nodes[0].line, 22);
-        assert_eq!(out.lines[1].nodes[0].line, 1);
+        assert_eq!(out.lines[1].nodes[0].line, 51, "yellow centreline with a black border");
+        assert_eq!(out.lines[2].nodes[0].line, 1);
+        assert_eq!(out.lines[3].nodes[0].line, 53, "yellow edge line with a black border");
     }
 
     #[test]
