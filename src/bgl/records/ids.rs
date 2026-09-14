@@ -7,6 +7,8 @@
 
 // Top level records
 pub const REC_AIRPORT: u16 = 0x003C;
+/// MSFS 2020 airport record from newer SDKs (Dubai 1.0.3): the 0x003C layout under a new id.
+pub const REC_AIRPORT_MSFS2020: u16 = 0x0056;
 /// MSFS 2024 airport record: the 0x003C body plus 24 bytes, ident moved to a 64-bit field.
 pub const REC_AIRPORT_MSFS2024: u16 = 0x0113;
 
