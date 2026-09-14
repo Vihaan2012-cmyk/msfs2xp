@@ -25,6 +25,22 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 
+[target.'cfg(windows)'.dependencies]
+native-windows-gui = { version = "1.0.13", default-features = false, features = [
+    "file-dialog",
+    "progress-bar",
+    "notice",
+    "list-view",
+    "image-decoder",
+    "image-list",
+    "tabs",
+    "listbox",
+    "combobox",
+    "textbox",
+    "frame",
+    "high-dpi",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 
