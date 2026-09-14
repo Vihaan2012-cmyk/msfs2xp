@@ -469,6 +469,145 @@ pub fn flip_bc_level(fmt: PixelFormat, data: &[u8], w: u32, h: u32) -> Option<Ve
     Some(out)
 }
 
+/// Mirror a BC1-style colour block left to right: two bits per pixel, one
+/// index byte per row.
+fn mirror_colour_block(b: &mut [u8]) {
+    for byte in &mut b[4..8] {
+        let v = *byte;
+        let mut o = 0u8;
+        for x in 0..4 {
+            o |= ((v >> (2 * x)) & 3) << (2 * (3 - x));
+        }
+        *byte = o;
+    }
+}
+
+/// Mirror a BC2 explicit alpha block: four bits per pixel, a u16 per row.
+fn mirror_bc2_alpha(b: &mut [u8]) {
+    for r in 0..4 {
+        let v = u16::from_le_bytes([b[2 * r], b[2 * r + 1]]);
+        let mut o = 0u16;
+        for x in 0..4 {
+            o |= ((v >> (4 * x)) & 0xF) << (4 * (3 - x));
+        }
+        b[2 * r..2 * r + 2].copy_from_slice(&o.to_le_bytes());
+    }
+}
+
+/// Mirror a BC3 alpha block: three-bit indices, 12 bits per pixel row.
+fn mirror_bc3_alpha(b: &mut [u8]) {
+    let mut bits = 0u64;
+    for (i, &byte) in b[2..8].iter().enumerate() {
+        bits |= (byte as u64) << (8 * i);
+    }
+    let mut out = 0u64;
+    for r in 0..4 {
+        let row = (bits >> (12 * r)) & 0xFFF;
+        let mut m = 0u64;
+        for x in 0..4 {
+            m |= ((row >> (3 * x)) & 7) << (3 * (3 - x));
+        }
+        out |= m << (12 * r);
+    }
+    for (i, byte) in b[2..8].iter_mut().enumerate() {
+        *byte = (out >> (8 * i)) as u8;
+    }
+}
+
+/// Mirror one level of BC1/BC2/BC3 data left to right without decoding it.
+/// Only possible when the width is a whole number of blocks.
+pub fn mirror_bc_level(fmt: PixelFormat, data: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    if w % 4 != 0 || !matches!(fmt, PixelFormat::Bc1 | PixelFormat::Bc2 | PixelFormat::Bc3) {
+        return None;
+    }
+    let bb = fmt.block_bytes()?;
+    let (bw, bh) = ((w / 4) as usize, h.div_ceil(4) as usize);
+    let row_bytes = bw * bb;
+    if data.len() < row_bytes * bh {
+        return None;
+    }
+    let mut out = Vec::with_capacity(row_bytes * bh);
+    for row in 0..bh {
+        let blocks = &data[row * row_bytes..(row + 1) * row_bytes];
+        for block in blocks.chunks_exact(bb).rev() {
+            let mut b = block.to_vec();
+            match fmt {
+                PixelFormat::Bc1 => mirror_colour_block(&mut b),
+                PixelFormat::Bc2 => {
+                    mirror_bc2_alpha(&mut b[0..8]);
+                    mirror_colour_block(&mut b[8..16]);
+                }
+                _ => {
+                    mirror_bc3_alpha(&mut b[0..8]);
+                    mirror_colour_block(&mut b[8..16]);
+                }
+            }
+            out.extend_from_slice(&b);
+        }
+    }
+    Some(out)
+}
+
+/// Flip a converted texture file (the DDS or PNG this converter writes)
+/// top to bottom and/or left to right. DDS data is rearranged block by
+/// block, losslessly; mip levels too small to rearrange are dropped.
+pub fn transform_texture_file(data: &[u8], flip_v: bool, flip_h: bool) -> Result<Vec<u8>, TextureError> {
+    if !flip_v && !flip_h {
+        return Ok(data.to_vec());
+    }
+    match detect(data) {
+        SourceFormat::Png => {
+            let mut img = image::load_from_memory_with_format(data, image::ImageFormat::Png)
+                .map_err(|e| TextureError::Png(e.to_string()))?
+                .to_rgba8();
+            if flip_v {
+                img = image::imageops::flip_vertical(&img);
+            }
+            if flip_h {
+                img = image::imageops::flip_horizontal(&img);
+            }
+            let (w, h) = img.dimensions();
+            let mut out = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut out);
+            image::ImageEncoder::write_image(encoder, img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+                .map_err(|e| TextureError::Png(e.to_string()))?;
+            Ok(out)
+        }
+        SourceFormat::Dds => {
+            let img = load_dds(data)?;
+            let mut levels = Vec::new();
+            for (i, level) in img.mips.iter().enumerate() {
+                let (w, h) = level_dims(img.width, img.height, i);
+                let mut l = Some(level.clone());
+                if flip_v {
+                    l = l.and_then(|d| flip_bc_level(img.format, &d, w, h));
+                }
+                if flip_h {
+                    l = l.and_then(|d| mirror_bc_level(img.format, &d, w, h));
+                }
+                match l {
+                    Some(d) => levels.push(d),
+                    None if i == 0 => {
+                        return Err(TextureError::Unsupported(format!(
+                            "{}x{} {:?} cannot be flipped block by block",
+                            img.width, img.height, img.format
+                        )))
+                    }
+                    None => break,
+                }
+            }
+            // Same header, with the mip count of what is left.
+            let mut out = data[..128].to_vec();
+            out[28..32].copy_from_slice(&(levels.len() as u32).to_le_bytes());
+            for l in levels {
+                out.extend_from_slice(&l);
+            }
+            Ok(out)
+        }
+        _ => Err(TextureError::Unsupported("only converted DDS and PNG textures can be flipped".into())),
+    }
+}
+
 /// Write BC1/BC2/BC3 data as an X-Plane-oriented DDS, flipping each level.
 pub fn to_xplane_dds(img: &TextureImage) -> Result<Vec<u8>, TextureError> {
     let four_cc: &[u8; 4] = match img.format {
@@ -797,6 +936,57 @@ mod tests {
         let bare = normal_metal_png(&normal, None, 1024).unwrap();
         let img = image::load_from_memory_with_format(&bare.bytes, image::ImageFormat::Png).unwrap().to_rgba8();
         assert_eq!(img.get_pixel(0, 0).0, [255, 127, 0, 128]);
+    }
+
+    fn mirrored(px: &[u8], w: usize, h: usize) -> Vec<u8> {
+        (0..h)
+            .flat_map(|y| (0..w).rev().flat_map(move |x| (0..4).map(move |c| (y, x, c))))
+            .map(|(y, x, c)| px[(y * w + x) * 4 + c])
+            .collect()
+    }
+
+    #[test]
+    fn block_mirroring_matches_a_pixel_mirror() {
+        for (fmt, seed) in [(PixelFormat::Bc1, 7), (PixelFormat::Bc2, 8), (PixelFormat::Bc3, 9)] {
+            let (w, h) = (16u32, 8u32);
+            let img = TextureImage {
+                width: w,
+                height: h,
+                format: fmt,
+                mips: vec![noise(level_size(fmt, w, h), seed)],
+            };
+            let before = decode_rgba8(&img, 0).unwrap();
+            let flipped = TextureImage {
+                mips: vec![mirror_bc_level(fmt, &img.mips[0], w, h).unwrap()],
+                ..img
+            };
+            let after = decode_rgba8(&flipped, 0).unwrap();
+            assert_eq!(after, mirrored(&before, w as usize, h as usize), "{fmt:?}");
+        }
+    }
+
+    #[test]
+    fn converted_files_flip_both_ways() {
+        let levels: Vec<Vec<u8>> = [(16, 4), (8, 5), (4, 6)]
+            .iter()
+            .map(|&(side, seed)| noise(level_size(PixelFormat::Bc3, side, side), seed))
+            .collect();
+        let dds = convert_for_xplane(&ktx2(137, 16, 16, &levels, 0)).unwrap().bytes;
+        let px = |bytes: &[u8]| decode_rgba8(&load_dds(bytes).unwrap(), 0).unwrap();
+        let before = px(&dds);
+        let turned = transform_texture_file(&dds, true, true).unwrap();
+        let back = transform_texture_file(&turned, true, true).unwrap();
+        assert_eq!(px(&back), before, "turning twice gives the original back");
+        let h = transform_texture_file(&dds, false, true).unwrap();
+        assert_eq!(px(&h), mirrored(&before, 16, 16));
+        assert_eq!(u32::from_le_bytes(h[28..32].try_into().unwrap()), 3, "all three levels kept");
+
+        let img = image::RgbaImage::from_raw(2, 1, vec![1, 2, 3, 255, 9, 9, 9, 255]).unwrap();
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let out = transform_texture_file(&png, false, true).unwrap();
+        let back = image::load_from_memory(&out).unwrap().to_rgba8();
+        assert_eq!(back.get_pixel(0, 0).0, [9, 9, 9, 255]);
     }
 
     #[test]

@@ -100,6 +100,11 @@ pub struct ConvertArgs {
     /// Largest normal map side with --normal-maps (they stay uncompressed in X-Plane).
     #[arg(long, default_value_t = 512)]
     pub normal_max: u32,
+
+    /// Texture fixes file (flips, hidden textures). By default each pack's own
+    /// msfs2xp-fixes.json is used.
+    #[arg(long)]
+    pub fixes: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]

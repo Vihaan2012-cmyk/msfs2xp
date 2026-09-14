@@ -34,6 +34,8 @@ pub struct ObjectsReport {
     pub texture_vram_mb: f64,
     /// Normal maps written (with --normal-maps).
     pub normal_maps: usize,
+    /// Hand-made texture fixes applied (flips, hidden textures).
+    pub texture_fixes: usize,
     pub triangles: usize,
     /// Placements whose model was found in neither the package nor a stock
     /// library on disk (usually MSFS 2024 stock objects, which are streamed).
@@ -55,7 +57,7 @@ pub struct ObjectsReport {
 }
 
 /// Options for the building stage.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ObjectOptions {
     /// Which LOD to start from; 0 is the most detailed.
     pub lod: usize,
@@ -69,6 +71,8 @@ pub struct ObjectOptions {
     /// Largest normal map side. X-Plane keeps normal maps uncompressed (four
     /// bytes a pixel), so they get less than the colour textures.
     pub normal_max: u32,
+    /// Texture fixes file; by default the pack's own msfs2xp-fixes.json.
+    pub fixes: Option<PathBuf>,
 }
 
 impl Default for ObjectOptions {
@@ -79,6 +83,7 @@ impl Default for ObjectOptions {
             max_texture: 2048,
             normal_maps: false,
             normal_max: 512,
+            fixes: None,
         }
     }
 }
@@ -307,6 +312,15 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     missing.truncate(200);
     report.missing_models = missing;
 
+    // Hand-made texture fixes (flips, hidden textures), kept at the pack root
+    // so they survive re-conversion.
+    let fixes_path = opts.fixes.clone().unwrap_or_else(|| pack_dir.join(crate::fixes::FILE_NAME));
+    let fixes = crate::fixes::Fixes::load(&fixes_path).unwrap_or_else(|e| {
+        tracing::warn!("ignoring texture fixes in {}: {e}", fixes_path.display());
+        crate::fixes::Fixes::default()
+    });
+    report.texture_fixes = fixes.textures.len();
+
     let objects_dir = pack_dir.join("objects");
     let textures_dir = objects_dir.join("textures");
     // Start clean: object names depend on scale and height, so files from an
@@ -461,6 +475,12 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                     groups.iter().find(|g| &g.0 == k).map(|g| g.1.clone()).unwrap_or_default()
                 };
                 for (i, key) in keys.iter().enumerate() {
+                    // A texture hidden by hand draws nothing; the first object
+                    // still carries the model's lights.
+                    let hidden = key.base.as_deref().is_some_and(|b| fixes.get(b).hide);
+                    if hidden && (i != 0 || model.lights.is_empty()) {
+                        continue;
+                    }
                     let texture = key.base.as_deref().and_then(|t| texture_for(t, radius));
                     // Night glow needs less detail than the day texture: one tier
                     // lower, unless the same image is also the day texture.
@@ -479,7 +499,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                     };
                     let mut parts = vec![LodPart {
                         model: &model,
-                        meshes: meshes_of(&near_groups, key),
+                        meshes: if hidden { Vec::new() } else { meshes_of(&near_groups, key) },
                         near: 0.0,
                         far: draw_to,
                     }];
@@ -487,7 +507,7 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
                         parts[0].far = near_to;
                         parts.push(LodPart {
                             model: far,
-                            meshes: meshes_of(&far_groups, key),
+                            meshes: if hidden { Vec::new() } else { meshes_of(&far_groups, key) },
                             near: near_to,
                             far: draw_to,
                         });
@@ -638,7 +658,13 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
             if !file.ends_with(c.extension) {
                 return Err(format!("came out as {}", c.extension));
             }
-            std::fs::write(textures_dir.join(file), &c.bytes).map_err(|e| e.to_string())?;
+            let fix = fixes.get(file);
+            let bytes = if fix.flips() {
+                texture::transform_texture_file(&c.bytes, fix.flip_v, fix.flip_h).map_err(|e| e.to_string())?
+            } else {
+                c.bytes
+            };
+            std::fs::write(textures_dir.join(file), &bytes).map_err(|e| e.to_string())?;
             Ok(c.vram_bytes)
         })
         .collect();

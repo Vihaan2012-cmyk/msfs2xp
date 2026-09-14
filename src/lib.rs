@@ -4,6 +4,7 @@ pub mod bgl;
 pub mod cli;
 pub mod convert;
 pub mod decals;
+pub mod fixes;
 pub mod geo;
 pub mod jetways;
 pub mod materials;

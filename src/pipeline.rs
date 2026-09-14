@@ -246,6 +246,7 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                     max_texture: args.max_texture,
                     normal_maps: args.normal_maps,
                     normal_max: args.normal_max,
+                    fixes: args.fixes.clone(),
                 };
                 match crate::objects::build(&loaded, &dir, &opts) {
                     Ok(r) => {
@@ -268,6 +269,9 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                                 r.not_in_package,
                                 r.failed_models.len()
                             );
+                        }
+                        if r.texture_fixes > 0 {
+                            println!("  texture fixes: {} applied", r.texture_fixes);
                         }
                         if r.normal_maps > 0 {
                             println!("  normal maps: {} for buildings 15 m and larger", r.normal_maps);
