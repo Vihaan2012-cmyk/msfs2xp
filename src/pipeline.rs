@@ -262,6 +262,9 @@ pub fn run_convert(args: &ConvertArgs) -> anyhow::Result<i32> {
                             r.dsf_tiles.len(),
                             began.elapsed().as_secs_f64()
                         );
+                        if r.static_aircraft > 0 {
+                            println!("  objects: left out {} static aircraft placements", r.static_aircraft);
+                        }
                         if r.stock_placements > 0 || r.not_in_package > 0 || !r.failed_models.is_empty() {
                             println!(
                                 "  objects: {} placements use MSFS 2020 stock models; {} use stock models not on this PC (MSFS 2024 streams them); {} models failed",

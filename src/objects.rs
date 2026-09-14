@@ -42,6 +42,8 @@ pub struct ObjectsReport {
     pub not_in_package: usize,
     /// Placements whose model came from an MSFS 2020 stock library.
     pub stock_placements: usize,
+    /// Placements of parked static aircraft, which are left out.
+    pub static_aircraft: usize,
     /// The most placed of those models: (GUID, placements), most first.
     pub missing_models: Vec<(String, usize)>,
     pub failed_models: Vec<String>,
@@ -182,6 +184,12 @@ fn is_interior(name: &str) -> bool {
     n.contains("interior") || n.contains("clutter")
 }
 
+/// iniBuilds' parked static aircraft (`ini_static_A380_UAE_EEH`). Left out:
+/// they come out broken in X-Plane.
+fn is_static_aircraft(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("ini_static_")
+}
+
 /// The largest texture side for a model of this radius: the full size for
 /// terminals (60 m and up), half for hangars, piers and towers, a quarter for
 /// vehicles and an eighth for people and small props, which never cover
@@ -296,8 +304,16 @@ pub fn build(loaded: &Loaded, pack_dir: &Path, opts: &ObjectOptions) -> anyhow::
     };
     let mut wanted: BTreeMap<VariantKey, f32> = BTreeMap::new();
     let mut missing: HashMap<Guid, usize> = HashMap::new();
+    let mut static_aircraft: HashMap<Guid, bool> = HashMap::new();
     for p in &loaded.placements {
-        if catalog.find(&p.guid).is_some() {
+        if let Some(lib) = catalog.find(&p.guid) {
+            let skip = *static_aircraft
+                .entry(p.guid)
+                .or_insert_with(|| lib.info(&p.guid).is_ok_and(|i| is_static_aircraft(&i.name)));
+            if skip {
+                report.static_aircraft += 1;
+                continue;
+            }
             wanted.entry(key(p)).or_insert(p.scale);
             if !package_guids.contains(&p.guid) {
                 report.stock_placements += 1;
@@ -740,6 +756,13 @@ mod tests {
         assert!(is_interior("OMDB_Terminal_D_Interior_A"));
         assert!(is_interior("OMDB_Concourse_C_Clutter"));
         assert!(!is_interior("OMDB_Terminal_D_Exterior"));
+    }
+
+    #[test]
+    fn static_aircraft_are_recognised_but_static_jetways_are_not() {
+        assert!(is_static_aircraft("ini_static_A380_UAE_EEH"));
+        assert!(is_static_aircraft("ini_Static_B789_QTR"));
+        assert!(!is_static_aircraft("OMDB_Jetway_01_Static"));
     }
 
     #[test]
